@@ -1177,8 +1177,8 @@ class StrategyEngine:
 
         # Pending-order layout rules:
         # - max 1 pending LIMIT BUY per side always
-        # - balanced only: up to 2 total pending buys (one UP + one DOWN)
-        # - imbalanced live inventory: do not place new LIMIT BUY orders
+        # - balanced: up to 2 total pending buys (one UP + one DOWN)
+        # - imbalanced: at most 1 total pending buy, and only on smaller side
         if counts[side_label] >= 1:
             return False, f"max_one_limit_per_side side={side_label} count={counts[side_label]}"
         if self._tick_buy_count >= 1 and counts["UP"] == 0 and counts["DOWN"] == 0:
@@ -1192,7 +1192,11 @@ class StrategyEngine:
             if total_pending >= 2:
                 return False, f"balanced_pending_cap up={counts['UP']} down={counts['DOWN']}"
         else:
-            return False, f"live_not_balanced step_up={step_up} step_down={step_down}"
+            smaller_side = "UP" if step_up < step_down else "DOWN"
+            if side_label != smaller_side:
+                return False, f"only_smaller_side_allowed smaller={smaller_side}"
+            if total_pending >= 1:
+                return False, f"api pending exists up={counts['UP']} down={counts['DOWN']}"
 
         lock = self._fullset_imbalance_lock.get(contract.slug)
         if lock and (step_up, step_down) == (lock[0], lock[1]) and side_label == lock[2]:
