@@ -181,6 +181,7 @@ class PositionSnapshot:
     pnl_pct: float
     side_label: str
     market: ActiveContract
+    entry_source: str = "unknown"
 
 
 class BinancePriceFeed:
@@ -699,7 +700,32 @@ class PolymarketTrader:
 
     def trades_for_market(self, contract: ActiveContract) -> list[dict[str, Any]]:
         trades = self.client.get_trades(TradeParams(market=contract.condition_id))
-        return [trade for trade in trades if str(trade.get("asset_id") or trade.get("assetId") or trade.get("token_id") or "") in {contract.up.token_id, contract.down.token_id}]
+        account = str(self.config.funder or "").lower()
+        token_ids = {contract.up.token_id, contract.down.token_id}
+
+        def _is_account_trade(trade: dict[str, Any]) -> bool:
+            owner_fields = [
+                "owner", "user", "trader", "address", "maker_address", "makerAddress", "taker_address", "takerAddress", "maker", "taker",
+            ]
+            seen_owner_field = False
+            for field in owner_fields:
+                value = trade.get(field)
+                if value is None:
+                    continue
+                seen_owner_field = True
+                if str(value).lower() == account:
+                    return True
+            return not seen_owner_field
+
+        filtered: list[dict[str, Any]] = []
+        for trade in trades:
+            asset_id = str(trade.get("asset_id") or trade.get("assetId") or trade.get("token_id") or "")
+            if asset_id not in token_ids:
+                continue
+            if not _is_account_trade(trade):
+                continue
+            filtered.append(trade)
+        return filtered
 
 
 class StrategyEngine:
@@ -1105,8 +1131,17 @@ class StrategyEngine:
             self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
             return
         avg_sum = float(avg["UP"]) + float(avg["DOWN"])
-        if avg_sum >= 0.96:
+        profitable_threshold = 0.96
+        if avg_sum >= profitable_threshold:
             self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
+            LOGGER.info(
+                "[WINDOW HOLD] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | stop_if_avg_sum_lt=%.4f",
+                contract.slug,
+                float(avg["UP"]),
+                float(avg["DOWN"]),
+                avg_sum,
+                profitable_threshold,
+            )
             return
         self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
 
@@ -1114,11 +1149,12 @@ class StrategyEngine:
             self._fullset_window_stopped.add(contract.slug)
             cancelled = self._cancel_contract_buy_orders(contract, open_orders)
             LOGGER.info(
-                "[WINDOW STOP] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | trigger=balanced_profitable | cancelled=%d",
+                "[WINDOW STOP] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | trigger=balanced_profitable_avg_sum_lt_%.2f | cancelled=%d",
                 contract.slug,
                 float(avg["UP"]),
                 float(avg["DOWN"]),
                 avg_sum,
+                profitable_threshold,
                 cancelled,
             )
 
@@ -1706,24 +1742,37 @@ class StrategyEngine:
 
             entry_price = 0.0
             opened_at = datetime.now(timezone.utc)
+            entry_source = "none"
             lots = _open_lots_from_trades(market_trades, token_id)
             if lots:
                 total_shares = sum(size for size, _, _ in lots)
                 if total_shares > 0:
                     entry_price = sum(size * price for size, price, _ in lots) / total_shares
                     opened_at = lots[0][2]
+                    entry_source = "api_trades_fifo"
 
             cache = self._local_position_cache.get(token_id, {})
             if entry_price <= 0:
                 entry_price = float(cache.get("original_entry_price") or cache.get("entry_price") or 0.0)
-                if entry_price <= 0:
-                    current_px = self.trader.get_token_price(token_id)
-                    entry_price = max(0.01, current_px - 0.05)
+                if entry_price > 0:
+                    entry_source = "local_order_cache"
+            if entry_price <= 0:
+                current_px = self.trader.get_token_price(token_id)
+                entry_price = max(0.01, current_px - 0.05)
+                entry_source = "price_fallback"
             if isinstance(cache.get("opened_at"), datetime):
                 opened_at = cache.get("opened_at")
 
             current_price = self.trader.get_token_price(token_id)
             pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
+            LOGGER.debug(
+                "[POSITION AVG] %s | side=%s | shares=%.4f | entry=%.4f | source=%s",
+                contract.slug,
+                label,
+                shares,
+                entry_price,
+                entry_source,
+            )
             positions.append(
                 PositionSnapshot(
                     token_id=token_id,
@@ -1734,6 +1783,7 @@ class StrategyEngine:
                     pnl_pct=pnl_pct,
                     side_label=label,
                     market=contract,
+                    entry_source=entry_source,
                 )
             )
 
