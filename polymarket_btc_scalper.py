@@ -91,6 +91,7 @@ class BotConfig:
     min_trade_usd: float = 1.0
     min_entry_price: float = 0.40
     max_entry_price: float = 0.52
+    window_stop_avg_sum_max: float = 0.90
     dry_run: bool = True
     request_timeout_seconds: float = 10.0
     log_level: str = "INFO"
@@ -132,6 +133,7 @@ class BotConfig:
             min_trade_usd=_env_float("BOT_MIN_TRADE_USD", 1.0),
             min_entry_price=_env_float("BOT_MIN_ENTRY_PRICE", 0.40),
             max_entry_price=_env_float("BOT_MAX_ENTRY_PRICE", 0.52),
+            window_stop_avg_sum_max=_env_float("BOT_WINDOW_STOP_AVG_SUM_MAX", 0.90),
             dry_run=_env_bool("POLY_DRY_RUN", True),
             request_timeout_seconds=_env_float("BOT_REQUEST_TIMEOUT_SECONDS", 10.0),
             log_level=os.getenv("BOT_LOG_LEVEL", "INFO").upper(),
@@ -1059,6 +1061,24 @@ class StrategyEngine:
                 sent_at = float(sent_meta.get("sent_at", 0.0) or 0.0)
                 sent_age = max(0.0, now_ts - sent_at)
                 if live_now > baseline_live:
+                    fill_shares = max(0.0, live_now - baseline_live)
+                    token = contract.up if side_label == "UP" else contract.down
+                    cache = dict(self._local_position_cache.get(token.token_id, {}))
+                    limit_price = _to_float(sent_meta.get("limit_price"))
+                    if limit_price and fill_shares > 0:
+                        prev_shares = max(0.0, baseline_live)
+                        prev_entry = _to_float(cache.get("entry_price")) or limit_price
+                        total_shares = prev_shares + fill_shares
+                        weighted = ((prev_entry * prev_shares) + (limit_price * fill_shares)) / total_shares if total_shares > 0 else limit_price
+                        cache["entry_price"] = float(weighted)
+                        cache["original_entry_price"] = float(weighted)
+                        cache["original_shares"] = float(total_shares)
+                        cache["side_label"] = side_label
+                        cache["token"] = token
+                        cache["opened_at"] = datetime.now(timezone.utc)
+                        cache["strategy"] = "fullset_arb"
+                        cache["entry_source"] = "limit_order_price"
+                        self._local_position_cache[token.token_id] = cache
                     LOGGER.info(
                         "[FULLSET SENT CONFIRMED] %s | side=%s | pending=%d | live=%.2f | baseline=%.2f",
                         contract.slug,
@@ -1155,7 +1175,7 @@ class StrategyEngine:
             return
 
         avg_sum = float(avg["UP"]) + float(avg["DOWN"])
-        profitable_threshold = 0.96
+        profitable_threshold = float(self.config.window_stop_avg_sum_max)
         if avg_sum >= profitable_threshold:
             self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
             if contract.slug in self._fullset_window_stopped:
@@ -1368,6 +1388,8 @@ class StrategyEngine:
             "sent_at": now_ts,
             "baseline_live_shares": float(live_by_side[side_label]),
             "side": side_label,
+            "limit_price": float(rounded),
+            "requested_shares": float(share_count),
         }
         self._fullset_side_cooldown_until[cache_key] = now_ts + 10.0
         rounded_live = self._rounded_position_shares_by_side(live_positions)
@@ -1770,19 +1792,21 @@ class StrategyEngine:
             entry_price = 0.0
             opened_at = datetime.now(timezone.utc)
             entry_source = "none"
-            lots = _open_lots_from_trades(market_trades, token_id)
-            if lots:
-                total_shares = sum(size for size, _, _ in lots)
-                if total_shares > 0:
-                    entry_price = sum(size * price for size, price, _ in lots) / total_shares
-                    opened_at = lots[0][2]
-                    entry_source = "api_trades_fifo"
-
             cache = self._local_position_cache.get(token_id, {})
+            cached_entry = float(cache.get("original_entry_price") or cache.get("entry_price") or 0.0)
+            if cached_entry > 0:
+                entry_price = cached_entry
+                entry_source = str(cache.get("entry_source") or "local_order_cache")
+
             if entry_price <= 0:
-                entry_price = float(cache.get("original_entry_price") or cache.get("entry_price") or 0.0)
-                if entry_price > 0:
-                    entry_source = "local_order_cache"
+                lots = _open_lots_from_trades(market_trades, token_id)
+                if lots:
+                    total_shares = sum(size for size, _, _ in lots)
+                    if total_shares > 0:
+                        entry_price = sum(size * price for size, price, _ in lots) / total_shares
+                        opened_at = lots[0][2]
+                        entry_source = "api_trades_fifo"
+
             if entry_price <= 0:
                 current_px = self.trader.get_token_price(token_id)
                 entry_price = max(0.01, current_px - 0.05)
