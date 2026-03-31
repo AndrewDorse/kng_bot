@@ -289,6 +289,29 @@ class GammaMarketLocator:
         self._cached_contract: ActiveContract | None = None
         self._cache_expires_at = 0.0
 
+    def _compute_target_window_start(self, now_ts: int) -> int:
+        """Select target 5-minute window.
+
+        Startup:
+          - if current window age < 30s => current window
+          - otherwise => next window
+
+        After a window is selected, keep it active until that window ends.
+        """
+        window_size = 300
+        current_window_start = (now_ts // window_size) * window_size
+
+        if self._cached_contract is not None:
+            cached_start = int(self._cached_contract.end_time.timestamp()) - window_size
+            cached_end = int(self._cached_contract.end_time.timestamp())
+            if cached_start <= now_ts < cached_end:
+                return cached_start
+            if now_ts < cached_start:
+                return cached_start
+
+        seconds_into_current = now_ts - current_window_start
+        return current_window_start if seconds_into_current < 30 else current_window_start + window_size
+
     def _fetch_contract_for_window_start(self, target_window_start: int) -> ActiveContract | None:
         now = datetime.now(timezone.utc)
         slug = f"btc-updown-5m-{target_window_start}"
@@ -315,19 +338,7 @@ class GammaMarketLocator:
     def get_active_contract(self, force_refresh: bool = False) -> ActiveContract | None:
         now = time.time()
         now_ts = int(now)
-        window_size = 300
-
-        # Monitor the NEXT window during the full prior 5-minute block.
-        # Once that target window starts, keep tracking it until +early_bird_close_seconds, then roll forward.
-        current_window_start = (now_ts // window_size) * window_size
-        seconds_into_current = now_ts - current_window_start
-        target_window_start = current_window_start if seconds_into_current < 30 else current_window_start + window_size
-        if self._cached_contract is not None:
-            cached_start = int(self._cached_contract.end_time.timestamp()) - window_size
-            if now_ts < cached_start:
-                target_window_start = cached_start
-            elif cached_start <= now_ts < cached_start + self.config.early_bird_close_seconds + self.config.close_grace_seconds:
-                target_window_start = cached_start
+        target_window_start = self._compute_target_window_start(now_ts)
 
         expected_slug = f"btc-updown-5m-{target_window_start}"
 
@@ -352,16 +363,7 @@ class GammaMarketLocator:
         now = datetime.now(timezone.utc)
         now_ts = int(now.timestamp())
         window_size = 300
-
-        current_window_start = (now_ts // window_size) * window_size
-        seconds_into_current = now_ts - current_window_start
-        target_window_start = current_window_start if seconds_into_current < 30 else current_window_start + window_size
-        if self._cached_contract is not None:
-            cached_start = int(self._cached_contract.end_time.timestamp()) - window_size
-            if now_ts < cached_start:
-                target_window_start = cached_start
-            elif cached_start <= now_ts < cached_start + self.config.early_bird_close_seconds + self.config.close_grace_seconds:
-                target_window_start = cached_start
+        target_window_start = self._compute_target_window_start(now_ts)
 
         seconds_to_start = target_window_start - now_ts
         mode = "pre-window" if seconds_to_start > 0 else "current-target"
@@ -1041,10 +1043,6 @@ class StrategyEngine:
             until_ts = float(self._fullset_side_cooldown_until.get(key, 0.0) or 0.0)
             if until_ts and until_ts <= now_ts:
                 self._fullset_side_cooldown_until.pop(key, None)
-        if contract.slug in self._fullset_window_stopped:
-            avg = self._avg_entry_by_side(positions)
-            if avg["UP"] is None or avg["DOWN"] is None:
-                self._fullset_window_stopped.discard(contract.slug)
         live_slugs = {contract.slug}
         self._fullset_last_reset_check = {k: v for k, v in self._fullset_last_reset_check.items() if k in live_slugs or k == self._current_window_slug}
 
