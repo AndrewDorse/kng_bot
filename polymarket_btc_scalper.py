@@ -768,6 +768,7 @@ class StrategyEngine:
         self._fullset_sent_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._fullset_window_stopped: set[str] = set()
         self._fullset_last_reset_check: dict[str, float] = {}
+        self._fullset_force_market_rebalance_until: dict[tuple[str, str], float] = {}
         self._fullset_side_cooldown_until: dict[tuple[str, str], float] = {}
         self._fullset_order_first_seen_at: dict[tuple[str, str], float] = {}
         self._fullset_imbalance_lock: dict[str, tuple[int, int, str]] = {}
@@ -1226,6 +1227,7 @@ class StrategyEngine:
 
         if cancelled_smaller > 0:
             self._fullset_sent_cache.pop(self._fullset_cache_key(contract, smaller), None)
+            self._fullset_force_market_rebalance_until[self._fullset_cache_key(contract, smaller)] = now_ts + 20.0
         if cancelled_heavier > 0:
             self._fullset_sent_cache.pop(self._fullset_cache_key(contract, heavier), None)
 
@@ -1261,13 +1263,29 @@ class StrategyEngine:
         if step_diff <= 1:
             return False
         cancelled = self._cancel_contract_buy_orders(contract, open_orders)
-        self._fullset_imbalance_lock[contract.slug] = (step_up, step_down, "HARD_BLOCK")
+        smaller_side = "UP" if step_up < step_down else "DOWN"
+        self._fullset_force_market_rebalance_until[self._fullset_cache_key(contract, smaller_side)] = time.time() + 20.0
+        self._fullset_imbalance_lock[contract.slug] = (step_up, step_down, smaller_side)
+        risk_price = self._fullset_rebalance_buy_price(contract, smaller_side)
+        placed = False
+        if risk_price is not None:
+            placed = self._place_fullset_limit_buy(
+                contract=contract,
+                side_label=smaller_side,
+                price=float(risk_price),
+                share_count=self._fullset_order_shares(),
+                open_orders=open_orders,
+                positions=positions,
+                reason=f"rebalance_{smaller_side.lower()}_risk",
+            )
         LOGGER.error(
-            "[RISK VIOLATION] %s | step_up=%d | step_down=%d | max_allowed=1 | cancelled_pending=%d",
+            "[RISK VIOLATION] %s | step_up=%d | step_down=%d | max_allowed=1 | cancelled_pending=%d | forced_side=%s | emergency_buy=%s",
             contract.slug,
             step_up,
             step_down,
             cancelled,
+            smaller_side,
+            placed,
         )
         return True
 
@@ -1333,9 +1351,22 @@ class StrategyEngine:
             return False, f"max_imbalance_exceeded projected_up={projected_up} projected_down={projected_down}"
         return True, "ok"
 
+    def _fullset_rebalance_buy_price(self, contract: ActiveContract, side_label: str) -> float | None:
+        token = contract.up if side_label == "UP" else contract.down
+        key = self._fullset_cache_key(contract, side_label)
+        now_ts = time.time()
+        force_until = float(self._fullset_force_market_rebalance_until.get(key, 0.0) or 0.0)
+        if force_until > now_ts:
+            market_price = self.trader.get_token_price(token.token_id)
+            if market_price > 0:
+                return round(max(0.01, min(0.99, market_price)), 2)
+        elif key in self._fullset_force_market_rebalance_until:
+            self._fullset_force_market_rebalance_until.pop(key, None)
+        return self._entry_limit_price(token)
+
     def _get_fullset_snapshot(self, contract: ActiveContract, positions: list[PositionSnapshot], open_orders: list[dict[str, Any]]) -> dict[str, Any] | None:
-        up_price = self._entry_limit_price(contract.up)
-        down_price = self._entry_limit_price(contract.down)
+        up_price = self._fullset_rebalance_buy_price(contract, "UP")
+        down_price = self._fullset_rebalance_buy_price(contract, "DOWN")
         if up_price is None or down_price is None:
             return None
 
@@ -1413,6 +1444,8 @@ class StrategyEngine:
                 self._order_roles[order_id] = {"role": "entry", "token_id": token.token_id, "side_label": side_label, "price": rounded, "shares": float(share_count), "strategy": "fullset_arb", "reason": reason}
             self._window_entry_price_floor[token.token_id] = max(self._window_entry_price_floor.get(token.token_id, 0.0), rounded)
             self._local_position_cache[token.token_id] = {"token": token, "original_shares": float(share_count), "entry_price": float(rounded), "original_entry_price": float(rounded), "side_label": side_label, "opened_at": datetime.now(timezone.utc), "strategy": "fullset_arb", "reason": reason}
+            if reason.startswith("rebalance_"):
+                self._fullset_force_market_rebalance_until.pop(self._fullset_cache_key(contract, side_label), None)
             LOGGER.info("[FULLSET BUY] %s | side=%s | limit=$%.2f | shares=%d | reason=%s", contract.slug, side_label, rounded, share_count, reason)
             return True
         except Exception as exc:
@@ -1585,6 +1618,7 @@ class StrategyEngine:
             self._fullset_low_avg_sum_first_seen.clear()
             self._fullset_window_stopped.clear()
             self._fullset_last_reset_check.clear()
+            self._fullset_force_market_rebalance_until.clear()
             self._deals_this_window = 0
             self._panic_window_slug = None
             self._last_entry_order_ts = 0.0
