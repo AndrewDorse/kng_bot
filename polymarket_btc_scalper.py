@@ -1030,6 +1030,8 @@ class StrategyEngine:
             if sent_meta:
                 baseline_live = float(sent_meta.get("baseline_live_shares", 0.0) or 0.0)
                 live_now = float(live[side_label])
+                sent_at = float(sent_meta.get("sent_at", 0.0) or 0.0)
+                sent_age = max(0.0, now_ts - sent_at)
                 if live_now > baseline_live:
                     LOGGER.info(
                         "[FULLSET SENT CONFIRMED] %s | side=%s | pending=%d | live=%.2f | baseline=%.2f",
@@ -1038,6 +1040,16 @@ class StrategyEngine:
                         counts[side_label],
                         live_now,
                         baseline_live,
+                    )
+                    self._fullset_sent_cache.pop(key, None)
+                elif counts[side_label] == 0 and sent_age >= 2.0:
+                    LOGGER.info(
+                        "[FULLSET SENT CLEAR] %s | side=%s | pending=0 | live=%.2f | baseline=%.2f | age=%.1fs",
+                        contract.slug,
+                        side_label,
+                        live_now,
+                        baseline_live,
+                        sent_age,
                     )
                     self._fullset_sent_cache.pop(key, None)
             if counts[side_label] > 0:
@@ -1127,6 +1139,11 @@ class StrategyEngine:
         self._sync_order_roles(fresh_open_orders)
         cancelled_heavier = self._cancel_contract_buy_orders(contract, fresh_open_orders, only_side=heavier)
         cancelled_smaller = self._cancel_contract_buy_orders(contract, fresh_open_orders, only_side=smaller)
+
+        if cancelled_smaller > 0:
+            self._fullset_sent_cache.pop(self._fullset_cache_key(contract, smaller), None)
+        if cancelled_heavier > 0:
+            self._fullset_sent_cache.pop(self._fullset_cache_key(contract, heavier), None)
 
         # Allow one fresh rebalance retry after each 15s cleanup tick.
         self._fullset_imbalance_lock.pop(contract.slug, None)
