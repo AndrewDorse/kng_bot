@@ -947,6 +947,9 @@ class StrategyEngine:
     def _fullset_contract_waiting_for_confirmation(self, contract: ActiveContract) -> bool:
         return self._fullset_waiting_cache(contract)
 
+    def _fullset_side_waiting_for_confirmation(self, contract: ActiveContract, side_label: str) -> bool:
+        return self._fullset_cache_key(contract, side_label) in self._fullset_sent_cache
+
     def _fullset_clear_imbalance_lock_if_progressed(self, contract: ActiveContract, positions: list[PositionSnapshot]) -> None:
         lock = self._fullset_imbalance_lock.get(contract.slug)
         if not lock:
@@ -1180,10 +1183,10 @@ class StrategyEngine:
         self._cleanup_fullset_tracking(contract, positions, open_orders)
         if contract.slug in self._fullset_window_stopped:
             return False, "stopped window"
-        if self._fullset_contract_waiting_for_confirmation(contract):
-            return False, "waiting for API confirmation"
-        if self._tick_buy_count >= 1:
-            return False, "max_one_buy_per_tick"
+        if self._fullset_side_waiting_for_confirmation(contract, side_label):
+            return False, f"waiting_for_api_confirmation side={side_label}"
+        if self._tick_buy_count >= 2:
+            return False, "max_two_buys_per_tick"
         counts = self._pending_buy_order_counts_by_side(contract, open_orders)
         total_pending = counts["UP"] + counts["DOWN"]
         on_cd, cd_remaining = self._fullset_side_on_cooldown(contract, side_label)
@@ -1199,6 +1202,13 @@ class StrategyEngine:
         # - imbalanced live inventory: do not place new LIMIT BUY orders
         if counts[side_label] >= 1:
             return False, f"max_one_limit_per_side side={side_label} count={counts[side_label]}"
+        if self._tick_buy_count >= 1 and counts["UP"] == 0 and counts["DOWN"] == 0:
+            opposite_side = "DOWN" if side_label == "UP" else "UP"
+            if self._fullset_side_waiting_for_confirmation(contract, opposite_side):
+                # Allow a second same-tick buy only to complete an UP+DOWN balanced pair.
+                pass
+            else:
+                return False, "max_one_buy_per_tick"
         if step_up == step_down:
             if total_pending >= 2:
                 return False, f"balanced_pending_cap up={counts['UP']} down={counts['DOWN']}"
