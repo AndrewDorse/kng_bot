@@ -1082,6 +1082,7 @@ class StrategyEngine:
         return any(k[0] == contract.slug for k in self._fullset_sent_cache)
 
     def _mark_window_stopped_if_balanced_lock(self, contract: ActiveContract, positions: list[PositionSnapshot], open_orders: list[dict[str, Any]]) -> None:
+        now_ts = time.time()
         live = self._position_shares_by_side(positions)
         live_up = int(round(live["UP"]))
         live_down = int(round(live["DOWN"]))
