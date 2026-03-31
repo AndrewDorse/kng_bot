@@ -56,20 +56,21 @@ class EarlyBirdStrategy:
             LOGGER.info("[FULLSET WAIT] %s | balanced lock avg_sum=%.4f", contract.slug, float(avg_sum))
             return
 
-        if step_up > step_down:
-            if pending_total > 0:
-                LOGGER.info("[FULLSET WAIT API] %s | api pending exists | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
-                return
+        if step_up != step_down:
+            LOGGER.info("[FULLSET WAIT] %s | live inventory not balanced | step_up=%d | step_down=%d", contract.slug, step_up, step_down)
+            return
+
+        if pending_total >= 2:
+            LOGGER.info("[FULLSET WAIT API] %s | balanced pending cap | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
+            return
+        if pending_up_orders > 0 and pending_down_orders == 0:
             chosen_side = "DOWN"
             chosen_price = float(snapshot["down_buy_price"])
-            reason = "rebalance_down"
-        elif step_down > step_up:
-            if pending_total > 0:
-                LOGGER.info("[FULLSET WAIT API] %s | api pending exists | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
-                return
+            reason = "balanced_down_fill"
+        elif pending_down_orders > 0 and pending_up_orders == 0:
             chosen_side = "UP"
             chosen_price = float(snapshot["up_buy_price"])
-            reason = "rebalance_up"
+            reason = "balanced_up_fill"
         else:
             if pending_total >= 2:
                 LOGGER.info("[FULLSET WAIT API] %s | balanced pending cap | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)

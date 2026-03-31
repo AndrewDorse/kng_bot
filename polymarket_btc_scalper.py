@@ -1140,9 +1140,34 @@ class StrategyEngine:
         if live_up == live_down or live_up == 0 or live_down == 0:
             return
         smaller = "UP" if live_up < live_down else "DOWN"
-        cancelled = self._cancel_contract_buy_orders(contract, open_orders, only_side=smaller)
+        heavier = "DOWN" if smaller == "UP" else "UP"
+        cancelled_heavier = self._cancel_contract_buy_orders(contract, open_orders, only_side=heavier)
+        cancelled_smaller = self._cancel_contract_buy_orders(contract, open_orders, only_side=smaller)
+
+        # Allow one fresh rebalance retry after each 15s cleanup tick.
+        self._fullset_imbalance_lock.pop(contract.slug, None)
+        self._fullset_side_cooldown_until.pop(self._fullset_cache_key(contract, smaller), None)
+
+        if cancelled_heavier or cancelled_smaller:
+            LOGGER.info(
+                "[FULLSET 15S RESET] %s | smaller=%s | cancelled_smaller=%d | cancelled_heavier=%d | lock_reset=true",
+                contract.slug,
+                smaller,
+                cancelled_smaller,
+                cancelled_heavier,
+            )
+
+    def _cancel_invalid_pending_for_imbalance(self, contract: ActiveContract, positions: list[PositionSnapshot], open_orders: list[dict[str, Any]]) -> int:
+        live = self._position_shares_by_side(positions)
+        live_up = int(round(live["UP"]))
+        live_down = int(round(live["DOWN"]))
+        if live_up == live_down:
+            return 0
+        invalid_side = "UP" if live_up > live_down else "DOWN"
+        cancelled = self._cancel_contract_buy_orders(contract, open_orders, only_side=invalid_side)
         if cancelled:
-            LOGGER.info("[FULLSET 15S RESET] %s | smaller=%s | cancelled=%d", contract.slug, smaller, cancelled)
+            LOGGER.info("[FULLSET INVALID PENDING CANCEL] %s | invalid_side=%s | cancelled=%d", contract.slug, invalid_side, cancelled)
+        return cancelled
 
     def _fullset_side_on_cooldown(self, contract: ActiveContract, side_label: str) -> tuple[bool, float]:
         key = self._fullset_cache_key(contract, side_label)
@@ -1170,16 +1195,15 @@ class StrategyEngine:
 
         # Pending-order layout rules:
         # - max 1 pending LIMIT BUY per side always
-        # - balanced: up to 2 total pending buys (one UP + one DOWN)
-        # - imbalanced: at most 1 total pending buy (on lighter side only)
+        # - balanced only: up to 2 total pending buys (one UP + one DOWN)
+        # - imbalanced live inventory: do not place new LIMIT BUY orders
         if counts[side_label] >= 1:
             return False, f"max_one_limit_per_side side={side_label} count={counts[side_label]}"
         if step_up == step_down:
             if total_pending >= 2:
                 return False, f"balanced_pending_cap up={counts['UP']} down={counts['DOWN']}"
         else:
-            if total_pending >= 1:
-                return False, f"api pending exists up={counts['UP']} down={counts['DOWN']}"
+            return False, f"live_not_balanced step_up={step_up} step_down={step_down}"
 
         lock = self._fullset_imbalance_lock.get(contract.slug)
         if lock and (step_up, step_down) == (lock[0], lock[1]) and side_label == lock[2]:
@@ -1489,6 +1513,9 @@ class StrategyEngine:
         open_orders = self._open_orders_for_contract(contract)
         self._sync_order_roles(open_orders)
         self._cleanup_fullset_tracking(contract, positions, open_orders)
+        self._cancel_invalid_pending_for_imbalance(contract, positions, open_orders)
+        open_orders = self._open_orders_for_contract(contract)
+        self._sync_order_roles(open_orders)
         self._mark_window_stopped_if_balanced_lock(contract, positions, open_orders)
         self._cancel_smaller_side_every_15s(contract, positions, open_orders, now)
         open_orders = self._open_orders_for_contract(contract)
