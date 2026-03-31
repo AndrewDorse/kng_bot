@@ -1030,7 +1030,7 @@ class StrategyEngine:
             if sent_meta:
                 baseline_live = float(sent_meta.get("baseline_live_shares", 0.0) or 0.0)
                 live_now = float(live[side_label])
-                if counts[side_label] > 0 or live_now > baseline_live:
+                if live_now > baseline_live:
                     LOGGER.info(
                         "[FULLSET SENT CONFIRMED] %s | side=%s | pending=%d | live=%.2f | baseline=%.2f",
                         contract.slug,
@@ -1150,6 +1150,24 @@ class StrategyEngine:
         if cancelled:
             LOGGER.info("[FULLSET INVALID PENDING CANCEL] %s | invalid_side=%s | cancelled=%d", contract.slug, invalid_side, cancelled)
         return cancelled
+
+    def _enforce_max_live_imbalance(self, contract: ActiveContract, positions: list[PositionSnapshot], open_orders: list[dict[str, Any]]) -> bool:
+        live = self._rounded_position_shares_by_side(positions)
+        step_up = self._fullset_step_count(live["UP"])
+        step_down = self._fullset_step_count(live["DOWN"])
+        step_diff = abs(step_up - step_down)
+        if step_diff <= 1:
+            return False
+        cancelled = self._cancel_contract_buy_orders(contract, open_orders)
+        self._fullset_imbalance_lock[contract.slug] = (step_up, step_down, "HARD_BLOCK")
+        LOGGER.error(
+            "[RISK VIOLATION] %s | step_up=%d | step_down=%d | max_allowed=1 | cancelled_pending=%d",
+            contract.slug,
+            step_up,
+            step_down,
+            cancelled,
+        )
+        return True
 
     def _fullset_side_on_cooldown(self, contract: ActiveContract, side_label: str) -> tuple[bool, float]:
         key = self._fullset_cache_key(contract, side_label)
@@ -1542,6 +1560,9 @@ class StrategyEngine:
             has_position,
             pending_buys,
         )
+
+        if self._enforce_max_live_imbalance(contract, positions, open_orders):
+            return
 
         self._ensure_take_profit_orders(positions, open_orders)
         if self.enable_early_bird_strategy:
