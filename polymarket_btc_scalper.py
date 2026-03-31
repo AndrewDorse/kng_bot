@@ -1097,34 +1097,13 @@ class StrategyEngine:
         if avg_sum >= 0.96:
             self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
             return
-
-        first_seen = self._fullset_low_avg_sum_first_seen.get(contract.slug)
-        if first_seen is None:
-            self._fullset_low_avg_sum_first_seen[contract.slug] = now_ts
-            LOGGER.info(
-                "[WINDOW STOP VERIFY] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | waiting_for_recheck",
-                contract.slug,
-                float(avg["UP"]),
-                float(avg["DOWN"]),
-                avg_sum,
-            )
-            return
-        if now_ts - first_seen < 6.0:
-            LOGGER.info(
-                "[WINDOW STOP VERIFY] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | recheck_in=%.1fs",
-                contract.slug,
-                float(avg["UP"]),
-                float(avg["DOWN"]),
-                avg_sum,
-                6.0 - (now_ts - first_seen),
-            )
-            return
+        self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
 
         if contract.slug not in self._fullset_window_stopped:
             self._fullset_window_stopped.add(contract.slug)
             cancelled = self._cancel_contract_buy_orders(contract, open_orders)
             LOGGER.info(
-                "[WINDOW STOP] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | cancelled=%d",
+                "[WINDOW STOP] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | trigger=balanced_profitable | cancelled=%d",
                 contract.slug,
                 float(avg["UP"]),
                 float(avg["DOWN"]),
