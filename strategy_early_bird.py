@@ -41,13 +41,6 @@ class EarlyBirdStrategy:
         pending_up_orders = int(snapshot.get("pending_up_orders", 0))
         pending_down_orders = int(snapshot.get("pending_down_orders", 0))
         pending_total = pending_up_orders + pending_down_orders
-        if pending_total > 0:
-            LOGGER.info("[FULLSET WAIT API] %s | api pending exists | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
-            return
-
-        if snapshot.get("contract_waiting_confirmation") or snapshot.get("contract_waiting_cache"):
-            LOGGER.info("[FULLSET WAIT API] %s | waiting for API confirmation", contract.slug)
-            return
 
         live_up = int(snapshot.get("live_up_int", 0))
         live_down = int(snapshot.get("live_down_int", 0))
@@ -59,37 +52,61 @@ class EarlyBirdStrategy:
             LOGGER.info("[FULLSET WAIT] %s | balanced lock avg_sum=%.4f", contract.slug, float(avg_sum))
             return
 
-        if step_up > step_down:
-            chosen_side = "DOWN"
-            chosen_price = float(snapshot["down_buy_price"])
-            reason = "rebalance_down"
-        elif step_down > step_up:
-            chosen_side = "UP"
-            chosen_price = float(snapshot["up_buy_price"])
-            reason = "rebalance_up"
-        else:
-            last_side = self._last_balanced_side.get(contract.slug)
-            chosen_side = "DOWN" if last_side == "UP" else "UP"
-            chosen_price = float(snapshot["up_buy_price"] if chosen_side == "UP" else snapshot["down_buy_price"])
-            reason = "balanced_up" if chosen_side == "UP" else "balanced_down"
+        if step_up != step_down:
+            if pending_total > 0:
+                LOGGER.info(
+                    "[FULLSET WAIT API] %s | rebalance pending exists | pending_up=%d | pending_down=%d | step_up=%d | step_down=%d",
+                    contract.slug,
+                    pending_up_orders,
+                    pending_down_orders,
+                    step_up,
+                    step_down,
+                )
+                return
 
-        allowed, why = engine._can_place_fullset_pending_order(contract, chosen_side, open_orders, positions)
-        if not allowed:
-            LOGGER.info("[FULLSET WAIT API] %s | blocked by guard | side=%s | %s", contract.slug, chosen_side, why)
-            return
-
-        ok = engine._place_fullset_limit_buy(
-            contract=contract,
-            side_label=chosen_side,
-            price=chosen_price,
-            share_count=engine._fullset_order_shares(),
-            open_orders=open_orders,
-            positions=positions,
-            reason=reason,
-        )
-        if ok:
-            if step_up == step_down:
-                self._last_balanced_side[contract.slug] = chosen_side
-            LOGGER.info("[FULLSET OPEN] %s | side=%s | price=%.2f | reason=%s | live_up=%d | live_down=%d", contract.slug, chosen_side, chosen_price, reason, live_up, live_down)
+            if step_up < step_down:
+                order_plan = [("UP", float(snapshot["up_buy_price"]), "rebalance_up")]
+            else:
+                order_plan = [("DOWN", float(snapshot["down_buy_price"]), "rebalance_down")]
         else:
-            LOGGER.info("[FULLSET WAIT API] %s | place guard blocked | side=%s", contract.slug, chosen_side)
+            if pending_total >= 2:
+                LOGGER.info("[FULLSET WAIT API] %s | balanced pending cap | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
+                return
+
+            if pending_up_orders > 0 and pending_down_orders == 0:
+                order_plan = [("DOWN", float(snapshot["down_buy_price"]), "balanced_down_fill")]
+            elif pending_down_orders > 0 and pending_up_orders == 0:
+                order_plan = [("UP", float(snapshot["up_buy_price"]), "balanced_up_fill")]
+            else:
+                last_side = self._last_balanced_side.get(contract.slug)
+                first_side = "DOWN" if last_side == "UP" else "UP"
+                second_side = "DOWN" if first_side == "UP" else "UP"
+                order_plan = [
+                    (first_side, float(snapshot["up_buy_price"] if first_side == "UP" else snapshot["down_buy_price"]), f"balanced_{first_side.lower()}"),
+                    (second_side, float(snapshot["up_buy_price"] if second_side == "UP" else snapshot["down_buy_price"]), f"balanced_{second_side.lower()}"),
+                ]
+
+        opened_sides: list[str] = []
+        for chosen_side, chosen_price, reason in order_plan:
+            allowed, why = engine._can_place_fullset_pending_order(contract, chosen_side, open_orders, positions)
+            if not allowed:
+                LOGGER.info("[FULLSET WAIT API] %s | blocked by guard | side=%s | %s", contract.slug, chosen_side, why)
+                continue
+
+            ok = engine._place_fullset_limit_buy(
+                contract=contract,
+                side_label=chosen_side,
+                price=chosen_price,
+                share_count=engine._fullset_order_shares(),
+                open_orders=open_orders,
+                positions=positions,
+                reason=reason,
+            )
+            if ok:
+                opened_sides.append(chosen_side)
+                LOGGER.info("[FULLSET OPEN] %s | side=%s | price=%.2f | reason=%s | live_up=%d | live_down=%d", contract.slug, chosen_side, chosen_price, reason, live_up, live_down)
+            else:
+                LOGGER.info("[FULLSET WAIT API] %s | place guard blocked | side=%s", contract.slug, chosen_side)
+
+        if step_up == step_down and opened_sides:
+            self._last_balanced_side[contract.slug] = opened_sides[-1]
