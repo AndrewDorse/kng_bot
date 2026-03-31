@@ -1311,10 +1311,6 @@ class StrategyEngine:
         if step_up == step_down:
             if total_pending >= 2:
                 return False, f"balanced_pending_cap up={counts['UP']} down={counts['DOWN']}"
-            if step_up > 0:
-                avg = self._avg_entry_by_side(positions)
-                if avg["UP"] is None or avg["DOWN"] is None:
-                    return False, "waiting_api_avg_balanced_positions"
         else:
             smaller_side = "UP" if step_up < step_down else "DOWN"
             if side_label != smaller_side:
