@@ -1032,6 +1032,8 @@ class StrategyEngine:
                 continue
             if p.side_label not in totals:
                 continue
+            if p.entry_source != "api_trades_fifo" or p.average_entry_price <= 0:
+                continue
             totals[p.side_label]["shares"] += float(p.shares)
             totals[p.side_label]["cost"] += float(p.shares) * float(p.average_entry_price)
 
@@ -1309,6 +1311,10 @@ class StrategyEngine:
         if step_up == step_down:
             if total_pending >= 2:
                 return False, f"balanced_pending_cap up={counts['UP']} down={counts['DOWN']}"
+            if step_up > 0:
+                avg = self._avg_entry_by_side(positions)
+                if avg["UP"] is None or avg["DOWN"] is None:
+                    return False, "waiting_api_avg_balanced_positions"
         else:
             smaller_side = "UP" if step_up < step_down else "DOWN"
             if side_label != smaller_side:
@@ -1556,6 +1562,21 @@ class StrategyEngine:
                 LOGGER.info("[WINDOW CHANGE] %s -> %s", self._current_window_slug, contract.slug)
             else:
                 LOGGER.info("[WINDOW] %s | Ends: %s", contract.slug, contract.end_time.strftime("%H:%M:%S"))
+            preserved_positions: dict[str, dict[str, Any]] = {}
+            for pos in positions:
+                if pos.shares < 1.0:
+                    continue
+                token = contract.up if pos.side_label == "UP" else contract.down
+                preserved_positions[pos.token_id] = {
+                    "token": token,
+                    "original_shares": float(pos.shares),
+                    "entry_price": float(pos.average_entry_price),
+                    "original_entry_price": float(pos.average_entry_price),
+                    "side_label": pos.side_label,
+                    "opened_at": pos.opened_at,
+                    "strategy": "carryover",
+                    "entry_source": pos.entry_source,
+                }
             self._current_window_slug = contract.slug
             self._local_position_cache.clear()
             self._window_entry_price_floor.clear()
@@ -1577,6 +1598,7 @@ class StrategyEngine:
             self._local_pending_entry_count = 0
             self._awaiting_entry_fill_token_id = None
             self._awaiting_entry_order_id = None
+            self._local_position_cache.update(preserved_positions)
             LOGGER.info("[WINDOW RESET] Cache cleared, deals reset to 0 for new live window")
             try:
                 _, balance = self.trader.get_all_balances()
@@ -1791,28 +1813,14 @@ class StrategyEngine:
 
             entry_price = 0.0
             opened_at = datetime.now(timezone.utc)
-            entry_source = "none"
-            cache = self._local_position_cache.get(token_id, {})
-            cached_entry = float(cache.get("original_entry_price") or cache.get("entry_price") or 0.0)
-            if cached_entry > 0:
-                entry_price = cached_entry
-                entry_source = str(cache.get("entry_source") or "local_order_cache")
-
-            if entry_price <= 0:
-                lots = _open_lots_from_trades(market_trades, token_id)
-                if lots:
-                    total_shares = sum(size for size, _, _ in lots)
-                    if total_shares > 0:
-                        entry_price = sum(size * price for size, price, _ in lots) / total_shares
-                        opened_at = lots[0][2]
-                        entry_source = "api_trades_fifo"
-
-            if entry_price <= 0:
-                current_px = self.trader.get_token_price(token_id)
-                entry_price = max(0.01, current_px - 0.05)
-                entry_source = "price_fallback"
-            if isinstance(cache.get("opened_at"), datetime):
-                opened_at = cache.get("opened_at")
+            entry_source = "api_missing"
+            lots = _open_lots_from_trades(market_trades, token_id)
+            if lots:
+                total_shares = sum(size for size, _, _ in lots)
+                if total_shares > 0:
+                    entry_price = sum(size * price for size, price, _ in lots) / total_shares
+                    opened_at = lots[0][2]
+                    entry_source = "api_trades_fifo"
 
             current_price = self.trader.get_token_price(token_id)
             pnl_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
