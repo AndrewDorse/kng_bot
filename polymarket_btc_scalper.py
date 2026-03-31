@@ -1119,25 +1119,26 @@ class StrategyEngine:
         live = self._position_shares_by_side(positions)
         live_up = int(round(live["UP"]))
         live_down = int(round(live["DOWN"]))
-        if live_up == live_down or live_up == 0 or live_down == 0:
+        if live_up == live_down:
             return
         smaller = "UP" if live_up < live_down else "DOWN"
         heavier = "DOWN" if smaller == "UP" else "UP"
-        cancelled_heavier = self._cancel_contract_buy_orders(contract, open_orders, only_side=heavier)
-        cancelled_smaller = self._cancel_contract_buy_orders(contract, open_orders, only_side=smaller)
+        fresh_open_orders = self._open_orders_for_contract(contract)
+        self._sync_order_roles(fresh_open_orders)
+        cancelled_heavier = self._cancel_contract_buy_orders(contract, fresh_open_orders, only_side=heavier)
+        cancelled_smaller = self._cancel_contract_buy_orders(contract, fresh_open_orders, only_side=smaller)
 
         # Allow one fresh rebalance retry after each 15s cleanup tick.
         self._fullset_imbalance_lock.pop(contract.slug, None)
         self._fullset_side_cooldown_until.pop(self._fullset_cache_key(contract, smaller), None)
 
-        if cancelled_heavier or cancelled_smaller:
-            LOGGER.info(
-                "[FULLSET 15S RESET] %s | smaller=%s | cancelled_smaller=%d | cancelled_heavier=%d | lock_reset=true",
-                contract.slug,
-                smaller,
-                cancelled_smaller,
-                cancelled_heavier,
-            )
+        LOGGER.info(
+            "[FULLSET 15S RESET] %s | smaller=%s | cancelled_smaller=%d | cancelled_heavier=%d | lock_reset=true",
+            contract.slug,
+            smaller,
+            cancelled_smaller,
+            cancelled_heavier,
+        )
 
     def _cancel_invalid_pending_for_imbalance(self, contract: ActiveContract, positions: list[PositionSnapshot], open_orders: list[dict[str, Any]]) -> int:
         live = self._position_shares_by_side(positions)
