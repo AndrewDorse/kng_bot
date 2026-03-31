@@ -743,6 +743,7 @@ class StrategyEngine:
         self._fullset_side_cooldown_until: dict[tuple[str, str], float] = {}
         self._fullset_order_first_seen_at: dict[tuple[str, str], float] = {}
         self._fullset_imbalance_lock: dict[str, tuple[int, int, str]] = {}
+        self._fullset_low_avg_sum_first_seen: dict[str, float] = {}
         self._tick_second: int = 0
         self._tick_buy_count: int = 0
         self._last_network_error_log_ts: float = 0.0
@@ -1078,27 +1079,55 @@ class StrategyEngine:
         return any(k[0] == contract.slug for k in self._fullset_sent_cache)
 
     def _mark_window_stopped_if_balanced_lock(self, contract: ActiveContract, positions: list[PositionSnapshot], open_orders: list[dict[str, Any]]) -> None:
+        now_ts = time.time()
         live = self._position_shares_by_side(positions)
         live_up = int(round(live["UP"]))
         live_down = int(round(live["DOWN"]))
         if live_up <= 0 or live_down <= 0 or live_up != live_down:
+            self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
             return
         avg = self._avg_entry_by_side(positions)
         if avg["UP"] is None or avg["DOWN"] is None:
+            self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
             return
         avg_sum = float(avg["UP"]) + float(avg["DOWN"])
-        if avg_sum < 0.96:
-            if contract.slug not in self._fullset_window_stopped:
-                self._fullset_window_stopped.add(contract.slug)
-                cancelled = self._cancel_contract_buy_orders(contract, open_orders)
-                LOGGER.info(
-                    "[WINDOW STOP] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | cancelled=%d",
-                    contract.slug,
-                    float(avg["UP"]),
-                    float(avg["DOWN"]),
-                    avg_sum,
-                    cancelled,
-                )
+        if avg_sum >= 0.96:
+            self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
+            return
+
+        first_seen = self._fullset_low_avg_sum_first_seen.get(contract.slug)
+        if first_seen is None:
+            self._fullset_low_avg_sum_first_seen[contract.slug] = now_ts
+            LOGGER.info(
+                "[WINDOW STOP VERIFY] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | waiting_for_recheck",
+                contract.slug,
+                float(avg["UP"]),
+                float(avg["DOWN"]),
+                avg_sum,
+            )
+            return
+        if now_ts - first_seen < 6.0:
+            LOGGER.info(
+                "[WINDOW STOP VERIFY] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | recheck_in=%.1fs",
+                contract.slug,
+                float(avg["UP"]),
+                float(avg["DOWN"]),
+                avg_sum,
+                6.0 - (now_ts - first_seen),
+            )
+            return
+
+        if contract.slug not in self._fullset_window_stopped:
+            self._fullset_window_stopped.add(contract.slug)
+            cancelled = self._cancel_contract_buy_orders(contract, open_orders)
+            LOGGER.info(
+                "[WINDOW STOP] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | cancelled=%d",
+                contract.slug,
+                float(avg["UP"]),
+                float(avg["DOWN"]),
+                avg_sum,
+                cancelled,
+            )
 
     def _cancel_smaller_side_every_15s(self, contract: ActiveContract, positions: list[PositionSnapshot], open_orders: list[dict[str, Any]], now_ts: float) -> None:
         last = self._fullset_last_reset_check.get(contract.slug, 0.0)
@@ -1132,16 +1161,26 @@ class StrategyEngine:
             return False, "max_one_buy_per_tick"
         counts = self._pending_buy_order_counts_by_side(contract, open_orders)
         total_pending = counts["UP"] + counts["DOWN"]
-        if total_pending > 0:
-            return False, f"api pending exists up={counts['UP']} down={counts['DOWN']}"
-        if counts[side_label] >= 1:
-            return False, f"max_one_limit_per_side side={side_label} count={counts[side_label]}"
         on_cd, cd_remaining = self._fullset_side_on_cooldown(contract, side_label)
         if on_cd:
             return False, f"side cooldown {cd_remaining:.1f}s"
         live = self._rounded_position_shares_by_side(positions)
         step_up = self._fullset_step_count(live["UP"])
         step_down = self._fullset_step_count(live["DOWN"])
+
+        # Pending-order layout rules:
+        # - max 1 pending LIMIT BUY per side always
+        # - balanced: up to 2 total pending buys (one UP + one DOWN)
+        # - imbalanced: at most 1 total pending buy (on lighter side only)
+        if counts[side_label] >= 1:
+            return False, f"max_one_limit_per_side side={side_label} count={counts[side_label]}"
+        if step_up == step_down:
+            if total_pending >= 2:
+                return False, f"balanced_pending_cap up={counts['UP']} down={counts['DOWN']}"
+        else:
+            if total_pending >= 1:
+                return False, f"api pending exists up={counts['UP']} down={counts['DOWN']}"
+
         lock = self._fullset_imbalance_lock.get(contract.slug)
         if lock and (step_up, step_down) == (lock[0], lock[1]) and side_label == lock[2]:
             return False, "imbalance lock active"
@@ -1389,6 +1428,7 @@ class StrategyEngine:
             self._fullset_side_cooldown_until.clear()
             self._fullset_order_first_seen_at.clear()
             self._fullset_imbalance_lock.clear()
+            self._fullset_low_avg_sum_first_seen.clear()
             self._fullset_window_stopped.clear()
             self._fullset_last_reset_check.clear()
             self._deals_this_window = 0
