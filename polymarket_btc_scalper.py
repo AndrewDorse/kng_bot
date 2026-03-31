@@ -1124,17 +1124,43 @@ class StrategyEngine:
         live = self._position_shares_by_side(positions)
         live_up = int(round(live["UP"]))
         live_down = int(round(live["DOWN"]))
-        if live_up <= 0 or live_down <= 0 or live_up != live_down:
+        is_balanced = live_up > 0 and live_down > 0 and live_up == live_down
+        if not is_balanced:
             self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
+            if contract.slug in self._fullset_window_stopped:
+                self._fullset_window_stopped.discard(contract.slug)
+                LOGGER.info("[WINDOW STOP CLEAR] %s | reason=not_balanced | live_up=%d | live_down=%d", contract.slug, live_up, live_down)
             return
+
         avg = self._avg_entry_by_side(positions)
         if avg["UP"] is None or avg["DOWN"] is None:
             self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
             return
+
+        sources_by_side: dict[str, set[str]] = {"UP": set(), "DOWN": set()}
+        for p in positions:
+            if p.shares <= 0:
+                continue
+            if p.side_label in sources_by_side:
+                sources_by_side[p.side_label].add(p.entry_source)
+
+        if "price_fallback" in sources_by_side["UP"] or "price_fallback" in sources_by_side["DOWN"]:
+            self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
+            LOGGER.info(
+                "[WINDOW HOLD] %s | reason=avg_source_unreliable | up_sources=%s | down_sources=%s",
+                contract.slug,
+                sorted(sources_by_side["UP"]),
+                sorted(sources_by_side["DOWN"]),
+            )
+            return
+
         avg_sum = float(avg["UP"]) + float(avg["DOWN"])
         profitable_threshold = 0.96
         if avg_sum >= profitable_threshold:
             self._fullset_low_avg_sum_first_seen.pop(contract.slug, None)
+            if contract.slug in self._fullset_window_stopped:
+                self._fullset_window_stopped.discard(contract.slug)
+                LOGGER.info("[WINDOW STOP CLEAR] %s | reason=avg_sum_recovered | avg_sum=%.4f", contract.slug, avg_sum)
             LOGGER.info(
                 "[WINDOW HOLD] %s | avg_up=%.4f | avg_down=%.4f | avg_sum=%.4f | stop_if_avg_sum_lt=%.4f",
                 contract.slug,
