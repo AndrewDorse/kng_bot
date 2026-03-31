@@ -41,9 +41,6 @@ class EarlyBirdStrategy:
         pending_up_orders = int(snapshot.get("pending_up_orders", 0))
         pending_down_orders = int(snapshot.get("pending_down_orders", 0))
         pending_total = pending_up_orders + pending_down_orders
-        if pending_total > 0:
-            LOGGER.info("[FULLSET WAIT API] %s | api pending exists | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
-            return
 
         if snapshot.get("contract_waiting_confirmation") or snapshot.get("contract_waiting_cache"):
             LOGGER.info("[FULLSET WAIT API] %s | waiting for API confirmation", contract.slug)
@@ -60,18 +57,36 @@ class EarlyBirdStrategy:
             return
 
         if step_up > step_down:
+            if pending_total > 0:
+                LOGGER.info("[FULLSET WAIT API] %s | api pending exists | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
+                return
             chosen_side = "DOWN"
             chosen_price = float(snapshot["down_buy_price"])
             reason = "rebalance_down"
         elif step_down > step_up:
+            if pending_total > 0:
+                LOGGER.info("[FULLSET WAIT API] %s | api pending exists | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
+                return
             chosen_side = "UP"
             chosen_price = float(snapshot["up_buy_price"])
             reason = "rebalance_up"
         else:
-            last_side = self._last_balanced_side.get(contract.slug)
-            chosen_side = "DOWN" if last_side == "UP" else "UP"
-            chosen_price = float(snapshot["up_buy_price"] if chosen_side == "UP" else snapshot["down_buy_price"])
-            reason = "balanced_up" if chosen_side == "UP" else "balanced_down"
+            if pending_total >= 2:
+                LOGGER.info("[FULLSET WAIT API] %s | balanced pending cap | pending_up=%d | pending_down=%d", contract.slug, pending_up_orders, pending_down_orders)
+                return
+            if pending_up_orders > 0 and pending_down_orders == 0:
+                chosen_side = "DOWN"
+                chosen_price = float(snapshot["down_buy_price"])
+                reason = "balanced_down_fill"
+            elif pending_down_orders > 0 and pending_up_orders == 0:
+                chosen_side = "UP"
+                chosen_price = float(snapshot["up_buy_price"])
+                reason = "balanced_up_fill"
+            else:
+                last_side = self._last_balanced_side.get(contract.slug)
+                chosen_side = "DOWN" if last_side == "UP" else "UP"
+                chosen_price = float(snapshot["up_buy_price"] if chosen_side == "UP" else snapshot["down_buy_price"])
+                reason = "balanced_up" if chosen_side == "UP" else "balanced_down"
 
         allowed, why = engine._can_place_fullset_pending_order(contract, chosen_side, open_orders, positions)
         if not allowed:
