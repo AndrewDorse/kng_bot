@@ -316,7 +316,7 @@ LEFTOVER_CLEANUP_PRICE = 0.98
 LEFTOVER_CLEANUP_BALANCE_MAX = 5.0
 LEFTOVER_CLEANUP_START_SECONDS_REMAINING = 300.0
 LEFTOVER_CLEANUP_INTERVAL_SECONDS = 5.0
-# Flatten odd-lot inventory: 0 < wallet balance < 2 shares → FAK sell at book-derived price, checked per side on this interval.
+# Flatten odd-lot window position: 0 < token_delta vs window baseline < 2 sh → FAK sell (per-side throttle below).
 SUB_TWO_SHARE_MAX_EXCLUSIVE = 2.0
 SUB_TWO_SHARE_MARKET_CHECK_SECONDS = 5.0
 EXIT_RECONCILE_INTERVAL_SECONDS = 30.0
@@ -1464,15 +1464,16 @@ class Btc15RedeemEngine:
         return 0.01
 
     def _maybe_market_sell_sub_two_share_inventory(self, contract: ActiveContract) -> None:
-        """If wallet holds >0 and <2 shares on a side, cancel any resting exit and FAK-sell at book/market (throttled per side)."""
+        """If window *position* (token delta vs baseline) is >0 and <2 sh, FAK-sell that size (capped by free wallet after cancel)."""
         if self._strategy_mode_hold_to_redeem():
             return
         now = time.time()
         for side_label, token in (("UP", contract.up), ("DOWN", contract.down)):
             if now - self._last_sub_two_market_attempt_ts[side_label] < SUB_TWO_SHARE_MARKET_CHECK_SECONDS:
                 continue
-            balance = float(self.trader.token_balance(token.token_id))
-            if balance <= 0.0 or balance >= SUB_TWO_SHARE_MAX_EXCLUSIVE:
+            baseline = self._baseline_up_balance if side_label == "UP" else self._baseline_down_balance
+            position_shares = float(self._token_delta(token, baseline))
+            if position_shares <= 0.0 or position_shares >= SUB_TWO_SHARE_MAX_EXCLUSIVE:
                 continue
 
             self._last_sub_two_market_attempt_ts[side_label] = now
@@ -1492,38 +1493,50 @@ class Btc15RedeemEngine:
                     side_label,
                     oid[:16] if oid else "n/a",
                 )
-                balance = float(self.trader.token_balance(token.token_id))
-                if balance <= 0.0 or balance >= SUB_TWO_SHARE_MAX_EXCLUSIVE:
-                    continue
+
+            free_wallet = float(self.trader.token_balance(token.token_id))
+            sell_qty = min(max(0.0, free_wallet), position_shares)
+            if sell_qty <= 0.0:
+                LOGGER.debug(
+                    "[SUB2 DUMP SKIP] %s | side=%s | position=%.4f sh but free_wallet=%.4f after cancel",
+                    contract.slug,
+                    side_label,
+                    position_shares,
+                    free_wallet,
+                )
+                continue
 
             px = self._sub_two_marketable_sell_limit_price(token, side_label)
             if self.config.dry_run:
                 LOGGER.info(
-                    "[DRY SUB2 DUMP] %s | side=%s | limit=$%.2f | shares=%.4f (would FAK sell)",
+                    "[DRY SUB2 DUMP] %s | side=%s | position=%.4f | sell=%.4f | limit=$%.2f (would FAK sell)",
                     contract.slug,
                     side_label,
+                    position_shares,
+                    sell_qty,
                     px,
-                    balance,
                 )
                 continue
             try:
-                resp = self.trader.place_marketable_sell(token, px, round(balance, 4))
+                resp = self.trader.place_marketable_sell(token, px, round(sell_qty, 4))
                 order_id = str(resp.get("orderID") or resp.get("id") or "")
                 LOGGER.info(
-                    "[SUB2 DUMP] %s | side=%s | marketable sell limit=$%.2f | shares=%.4f | order=%s",
+                    "[SUB2 DUMP] %s | side=%s | position=%.4f | sell=%.4f | limit=$%.2f | order=%s",
                     contract.slug,
                     side_label,
+                    position_shares,
+                    sell_qty,
                     px,
-                    balance,
                     order_id[:16] if order_id else "n/a",
                 )
             except Exception as exc:
                 LOGGER.warning(
-                    "[SUB2 DUMP FAILED] %s | side=%s | limit=$%.2f | shares=%.4f | %s",
+                    "[SUB2 DUMP FAILED] %s | side=%s | position=%.4f | sell=%.4f | limit=$%.2f | %s",
                     contract.slug,
                     side_label,
+                    position_shares,
+                    sell_qty,
                     px,
-                    balance,
                     exc,
                 )
 
