@@ -1,0 +1,656 @@
+#!/usr/bin/env python3
+"""Configuration, data types, and shared utilities."""
+
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import os
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+LOGGER = logging.getLogger("polymarket_btc_ladder")
+
+HOST = "https://clob.polymarket.com"
+CHAIN_ID = 137
+GAMMA_URL = "https://gamma-api.polymarket.com"
+BUY = "BUY"
+SELL = "SELL"
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+class BotConfigError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class BotConfig:
+    private_key: str
+    funder: str
+    bot_version: str = "2026-04-15 19:10:00"
+    signature_type: int = 0
+    dry_run: bool = True
+    poll_interval_seconds: float = 1.0
+    request_timeout_seconds: float = 10.0
+    log_level: str = "INFO"
+    relayer_api_key: str = ""
+    relayer_secret: str = ""
+    relayer_passphrase: str = ""
+    force_exit_before_end_seconds: int = 15
+    # Ladder config
+    ladder_prices: list = field(default_factory=lambda: [0.44, 0.34, 0.24, 0.14])
+    shares_per_level: int = 5
+    order_cooldown_seconds: float = 3.0
+    hedge_offset: float = 0.02
+    market_symbol: str = "BTC"
+    window_minutes: int = 15
+    window_pick_current_grace_seconds: int = 300
+    trade_one_window: bool = False
+    strategy_budget_cap_usdc: float = 80.0
+    strategy_wallet_reserve_usdc: float = 0.0
+    strategy_min_budget_usdc: float = 15.0
+    strategy_entry_delay_seconds: int = 35
+    strategy_new_order_cutoff_seconds: int = 30
+    strategy_fill_grace_seconds: float = 5.0
+    strategy_stale_order_seconds: float = 20.0
+    strategy_max_live_orders: int = 4
+    strategy_heartbeat_interval_seconds: int = 15
+    strategy_price_record_interval_seconds: float = 1.0
+    strategy_price_buffer: float = 0.02
+    strategy_primary_flip_threshold: float = 0.05
+    strategy_max_reversals: int = 1
+    strategy_min_stop_orders_per_side: int = 5
+    strategy_primary_unlock_seconds: int = 90
+    strategy_primary_lock_seconds: int = 720
+    strategy_pair_soft_limit: float = 1.03
+    strategy_pair_hard_limit: float = 1.06
+    strategy_late_stop_seconds: int = 780
+    strategy_late_stop_worst_case_usdc: float = 1.5
+    strategy_balance_retry_seconds: int = 10
+    strategy_balance_retry_attempts: int = 3
+    btc_feed_enabled: bool = True
+    btc_feed_poll_seconds: float = 1.0
+    btc_feed_symbol: str = "BTCUSDT"
+    signal_preset: str = "w1"
+    # strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up
+    strategy_mode: str = "wd"
+    # BTC volume scalp (volume_scalp_up aliases): UP+DOWN, one primary per side, TP per side; max entry $0.80 (engine).
+    volume_scalp_tp_offset: float = 0.12
+    volume_scalp_shares: int = 6
+    volume_scalp_entry_min_elapsed: int = 60
+    volume_scalp_entry_max_elapsed: int = 840
+    volume_scalp_volume_ratio: float = 2.5
+
+    @property
+    def window_size_seconds(self) -> int:
+        return self.window_minutes * 60
+
+    @property
+    def market_slug_prefix(self) -> str:
+        return f"{self.market_symbol.lower()}-updown-{self.window_minutes}m"
+
+    @property
+    def ladder_complements(self) -> list[float]:
+        """True complement prices: 1.00 - cheap price."""
+        return [round(1.0 - p, 2) for p in self.ladder_prices]
+
+    @property
+    def ladder_hedge_prices(self) -> list[float]:
+        """Hedge prices: 1.00 - cheap - offset (always profitable)."""
+        return [self.hedge_price_for(p) for p in self.ladder_prices]
+
+    def hedge_price_for(self, cheap_price: float) -> float:
+        """Calculate hedge price that guarantees profit.
+        
+        e.g. cheap=$0.44, offset=$0.02 → hedge=$0.54
+             pair cost = $0.44 + $0.54 = $0.98 < $1.00 → +$0.02/sh
+        """
+        return round(1.0 - cheap_price - self.hedge_offset, 2)
+
+    @classmethod
+    def from_env(cls) -> "BotConfig":
+        private_key = os.getenv("POLY_PRIVATE_KEY")
+        funder = os.getenv("POLY_FUNDER")
+        if not private_key:
+            raise BotConfigError("POLY_PRIVATE_KEY is required.")
+        if not funder:
+            raise BotConfigError("POLY_FUNDER is required.")
+
+        raw_prices = os.getenv("BOT_LADDER_PRICES", "")
+        if raw_prices.strip():
+            ladder_prices = [float(p.strip()) for p in raw_prices.split(",")]
+        else:
+            ladder_prices = [0.44, 0.34, 0.24, 0.14]
+
+        volume_scalp_tp_raw = _env_float("BOT_VOLUME_SCALP_TP_OFFSET", 0.12)
+        if volume_scalp_tp_raw > 1.0:
+            volume_scalp_tp_raw = volume_scalp_tp_raw / 100.0
+
+        return cls(
+            private_key=private_key,
+            funder=funder,
+            bot_version=os.getenv("BOT_VERSION", "2026-04-15 19:10:00").strip(),
+            signature_type=_env_int("POLY_SIGNATURE_TYPE", 1),
+            relayer_api_key=os.getenv("RELAYER_API_KEY", ""),
+            relayer_secret=os.getenv("RELAYER_SECRET", ""),
+            relayer_passphrase=os.getenv("RELAYER_PASSPHRASE", ""),
+            dry_run=_env_bool("POLY_DRY_RUN", True),
+            poll_interval_seconds=_env_float("BOT_POLL_INTERVAL_SECONDS", 1.0),
+            request_timeout_seconds=_env_float("BOT_REQUEST_TIMEOUT_SECONDS", 10.0),
+            log_level=os.getenv("BOT_LOG_LEVEL", "INFO").upper(),
+            force_exit_before_end_seconds=_env_int("BOT_FORCE_EXIT_BEFORE_END_SECONDS", 15),
+            shares_per_level=max(1, _env_int("BOT_SHARES_PER_LEVEL", 5)),
+            ladder_prices=ladder_prices,
+            order_cooldown_seconds=_env_float("BOT_ORDER_COOLDOWN_SECONDS", 3.0),
+            hedge_offset=_env_float("BOT_HEDGE_OFFSET", 0.02),
+            market_symbol=os.getenv("BOT_MARKET_SYMBOL", "BTC").upper(),
+            window_minutes=_env_int("BOT_WINDOW_MINUTES", 15),
+            window_pick_current_grace_seconds=_env_int("BOT_WINDOW_PICK_CURRENT_GRACE_SECONDS", 300),
+            trade_one_window=_env_bool("BOT_TRADE_ONE_WINDOW", False),
+            strategy_budget_cap_usdc=_env_float("BOT_STRATEGY_BUDGET_CAP_USDC", 80.0),
+            strategy_wallet_reserve_usdc=_env_float("BOT_STRATEGY_WALLET_RESERVE_USDC", 0.0),
+            strategy_min_budget_usdc=_env_float("BOT_STRATEGY_MIN_BUDGET_USDC", 15.0),
+            strategy_entry_delay_seconds=_env_int("BOT_STRATEGY_ENTRY_DELAY_SECONDS", 35),
+            strategy_new_order_cutoff_seconds=_env_int("BOT_STRATEGY_NEW_ORDER_CUTOFF_SECONDS", 30),
+            strategy_fill_grace_seconds=_env_float("BOT_STRATEGY_FILL_GRACE_SECONDS", 5.0),
+            strategy_stale_order_seconds=_env_float("BOT_STRATEGY_STALE_ORDER_SECONDS", 20.0),
+            strategy_max_live_orders=_env_int("BOT_STRATEGY_MAX_LIVE_ORDERS", 4),
+            strategy_heartbeat_interval_seconds=_env_int("BOT_STRATEGY_HEARTBEAT_INTERVAL_SECONDS", 15),
+            strategy_price_record_interval_seconds=_env_float("BOT_STRATEGY_PRICE_RECORD_INTERVAL_SECONDS", 1.0),
+            strategy_price_buffer=_env_float("BOT_STRATEGY_PRICE_BUFFER", 0.02),
+            strategy_primary_flip_threshold=_env_float("BOT_STRATEGY_PRIMARY_FLIP_THRESHOLD", 0.05),
+            strategy_max_reversals=_env_int("BOT_STRATEGY_MAX_REVERSALS", 1),
+            strategy_min_stop_orders_per_side=_env_int("BOT_STRATEGY_MIN_STOP_ORDERS_PER_SIDE", 5),
+            strategy_primary_unlock_seconds=_env_int("BOT_STRATEGY_PRIMARY_UNLOCK_SECONDS", 90),
+            strategy_primary_lock_seconds=_env_int("BOT_STRATEGY_PRIMARY_LOCK_SECONDS", 720),
+            strategy_pair_soft_limit=_env_float("BOT_STRATEGY_PAIR_SOFT_LIMIT", 1.03),
+            strategy_pair_hard_limit=_env_float("BOT_STRATEGY_PAIR_HARD_LIMIT", 1.06),
+            strategy_late_stop_seconds=_env_int("BOT_STRATEGY_LATE_STOP_SECONDS", 780),
+            strategy_late_stop_worst_case_usdc=_env_float("BOT_STRATEGY_LATE_STOP_WORST_CASE_USDC", 1.5),
+            strategy_balance_retry_seconds=_env_int("BOT_STRATEGY_BALANCE_RETRY_SECONDS", 10),
+            strategy_balance_retry_attempts=_env_int("BOT_STRATEGY_BALANCE_RETRY_ATTEMPTS", 3),
+            btc_feed_enabled=_env_bool("BOT_BTC_FEED_ENABLED", True),
+            btc_feed_poll_seconds=_env_float("BOT_BTC_FEED_POLL_SECONDS", 1.0),
+            btc_feed_symbol=os.getenv("BOT_BTC_FEED_SYMBOL", "BTCUSDT").upper(),
+            signal_preset=os.getenv("BOT_SIGNAL_PRESET", "w1").strip().lower(),
+            strategy_mode=os.getenv("BOT_STRATEGY_MODE", "wd").strip().lower(),
+            volume_scalp_tp_offset=volume_scalp_tp_raw,
+            volume_scalp_shares=max(1, _env_int("BOT_VOLUME_SCALP_SHARES", 6)),
+            volume_scalp_entry_min_elapsed=max(0, _env_int("BOT_VOLUME_SCALP_ENTRY_MIN_ELAPSED", 60)),
+            volume_scalp_entry_max_elapsed=max(1, _env_int("BOT_VOLUME_SCALP_ENTRY_MAX_ELAPSED", 840)),
+            volume_scalp_volume_ratio=_env_float("BOT_VOLUME_SCALP_VOLUME_RATIO", 2.5),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class TokenMarket:
+    market_id: str
+    condition_id: str
+    slug: str
+    question: str
+    token_id: str
+    outcome: str
+    end_time: datetime
+    enable_order_book: bool
+
+
+@dataclass(slots=True)
+class ActiveContract:
+    market_id: str
+    slug: str
+    question: str
+    condition_id: str
+    end_time: datetime
+    up: TokenMarket
+    down: TokenMarket
+    raw_market: dict[str, Any] = field(repr=False)
+
+
+# ---------------------------------------------------------------------------
+# Ladder level: the core state machine
+# ---------------------------------------------------------------------------
+@dataclass
+class LadderLevel:
+    """
+    One price level of the ladder.
+
+    Each level has cheap_price (e.g. $0.44) and complement (hedge price, e.g. $0.54).
+    
+    State machine per level:
+    
+    IDLE → place cheap UP + cheap DOWN
+    
+    When DOWN cheap fills:
+      → place hedge UP@complement ($0.54)
+      → state = DOWN_FILLED_HEDGED
+      → waiting for UP cheap ($0.44) OR UP hedge ($0.54)
+        - UP cheap fills → PROFIT pair ($0.44+$0.44=$0.88, +$0.12/sh) → cancel hedge → COMPLETE
+        - UP hedge fills → HEDGED pair ($0.44+$0.54=$0.98, +$0.02/sh) → cancel cheap → COMPLETE
+    
+    When UP cheap fills:
+      → place hedge DOWN@complement ($0.54)
+      → state = UP_FILLED_HEDGED
+      → waiting for DOWN cheap ($0.44) OR DOWN hedge ($0.54)
+        - DOWN cheap fills → PROFIT pair → cancel hedge → COMPLETE
+        - DOWN hedge fills → HEDGED pair → cancel cheap → COMPLETE
+    
+    When BOTH cheap fill simultaneously:
+      → PROFIT pair → COMPLETE (no hedge needed)
+    
+    COMPLETE → reload (back to IDLE)
+    
+    ALL outcomes are profitable. No breakeven case exists.
+    """
+    price: float          # cheap price, e.g. 0.44
+    complement: float     # hedge price = 1.0 - price - offset, e.g. 0.54
+    shares: int
+
+    # State
+    state: str = "IDLE"
+    # States: IDLE, PLACING, ACTIVE, 
+    #         UP_FILLED, DOWN_FILLED,
+    #         UP_FILLED_HEDGED, DOWN_FILLED_HEDGED,
+    #         COMPLETE
+
+    # Order tracking — cheap side
+    up_cheap_order_id: str | None = None
+    up_cheap_filled: bool = False
+    up_cheap_fill_price: float = 0.0
+
+    down_cheap_order_id: str | None = None
+    down_cheap_filled: bool = False
+    down_cheap_fill_price: float = 0.0
+
+    # Order tracking — hedge side
+    up_hedge_order_id: str | None = None
+    up_hedge_filled: bool = False
+    up_hedge_fill_price: float = 0.0
+
+    down_hedge_order_id: str | None = None
+    down_hedge_filled: bool = False
+    down_hedge_fill_price: float = 0.0
+
+    # Result
+    pair_cost: float = 0.0
+    pair_profit: float = 0.0
+    completions: int = 0  # how many times this level completed in window
+
+    def reset(self) -> None:
+        """Reset to IDLE for reload."""
+        self.state = "IDLE"
+        self.up_cheap_order_id = None
+        self.up_cheap_filled = False
+        self.up_cheap_fill_price = 0.0
+        self.down_cheap_order_id = None
+        self.down_cheap_filled = False
+        self.down_cheap_fill_price = 0.0
+        self.up_hedge_order_id = None
+        self.up_hedge_filled = False
+        self.up_hedge_fill_price = 0.0
+        self.down_hedge_order_id = None
+        self.down_hedge_filled = False
+        self.down_hedge_fill_price = 0.0
+        self.pair_cost = 0.0
+        self.pair_profit = 0.0
+
+    def get_all_live_order_ids(self) -> list[str]:
+        """Return all non-None order IDs for this level."""
+        ids = []
+        for oid in (
+            self.up_cheap_order_id,
+            self.down_cheap_order_id,
+            self.up_hedge_order_id,
+            self.down_hedge_order_id,
+        ):
+            if oid:
+                ids.append(oid)
+        return ids
+
+    def __repr__(self) -> str:
+        return (
+            f"Level(${self.price}/${self.complement} "
+            f"state={self.state} "
+            f"up_c={'✓' if self.up_cheap_filled else ('⏳' if self.up_cheap_order_id else '·')} "
+            f"dn_c={'✓' if self.down_cheap_filled else ('⏳' if self.down_cheap_order_id else '·')} "
+            f"up_h={'✓' if self.up_hedge_filled else ('⏳' if self.up_hedge_order_id else '·')} "
+            f"dn_h={'✓' if self.down_hedge_filled else ('⏳' if self.down_hedge_order_id else '·')} "
+            f"done={self.completions})"
+        )
+
+
+@dataclass
+class WindowStats:
+    """Stats for one 5-minute window."""
+    slug: str = ""
+    pairs_completed: int = 0
+    profit_pairs: int = 0
+    hedged_pairs: int = 0      # was breakeven_pairs — now always profitable
+    total_profit: float = 0.0
+    total_orders_placed: int = 0
+    total_fills: int = 0
+    total_cancels: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+def to_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip().replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+def parse_jsonish_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, list) else [parsed]
+        except json.JSONDecodeError:
+            return [p.strip() for p in text.split(",") if p.strip()]
+    return [value]
+
+
+def parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:
+            ts /= 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return parse_datetime(int(text))
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def parse_balance_response(response: Any, decimals: int = 6) -> float:
+    if isinstance(response, dict):
+        raw = response.get("balance")
+    else:
+        raw = response
+    if raw is None or raw == "":
+        return 0.0
+    if isinstance(raw, (int, float)):
+        val = float(raw)
+        if val > 1_000_000:
+            return val / (10 ** decimals)
+        return val
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        if not cleaned:
+            return 0.0
+        if cleaned.isdigit():
+            return int(cleaned) / (10 ** decimals)
+        if "." in cleaned:
+            try:
+                val = float(cleaned)
+                return val / (10 ** decimals) if val > 1_000_000 else val
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise BotConfigError(f"{name} must be a float") from exc
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise BotConfigError(f"{name} must be an int") from exc
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+def configure_logging(level: str) -> logging.Logger:
+    logger = logging.getLogger("polymarket_btc_ladder")
+    logger.setLevel(getattr(logging, level, logging.INFO))
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(getattr(logging, level, logging.INFO))
+    console.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s - %(message)s"
+    ))
+    logger.addHandler(console)
+    return logger
+
+
+def setup_file_logger(window_slug: str) -> None:
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filepath = logs_dir / f"{ts}_{window_slug}.log"
+
+    logger = logging.getLogger("polymarket_btc_ladder")
+    for h in logger.handlers[:]:
+        if isinstance(h, logging.FileHandler):
+            h.close()
+            logger.removeHandler(h)
+
+    fh = logging.FileHandler(filepath)
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s - %(message)s"))
+    logger.addHandler(fh)
+    LOGGER.info("Log file: %s", filepath.absolute())
+
+
+def append_window_balance_snapshot(
+    *,
+    fetched_at: datetime,
+    log_file: str,
+    slug: str,
+    question: str,
+    ends_at: str,
+    wallet_usdc: float,
+    budget_usdc: float,
+    baseline_up: float,
+    baseline_down: float,
+    dry_run: bool,
+    source: str = "live_window_start",
+) -> Path:
+    outdir = Path("exports")
+    outdir.mkdir(exist_ok=True)
+    path = outdir / "window_balance_snapshots.csv"
+    row = {
+        "fetched_at": fetched_at.isoformat(sep=" ", timespec="seconds"),
+        "log_file": log_file,
+        "slug": slug,
+        "question": question,
+        "ends_at": ends_at,
+        "wallet_usdc": round(wallet_usdc, 4),
+        "budget_usdc": round(budget_usdc, 4),
+        "baseline_up": round(baseline_up, 4),
+        "baseline_down": round(baseline_down, 4),
+        "dry_run": str(dry_run).lower(),
+        "source": source,
+    }
+    write_header = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    return path
+
+
+def prepare_window_price_snapshot_file(*, log_file: str, slug: str) -> Path:
+    outdir = Path("exports") / "window_price_snapshots"
+    outdir.mkdir(parents=True, exist_ok=True)
+    if log_file:
+        basename = Path(log_file).stem
+    else:
+        basename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{slug}"
+    path = outdir / f"{basename}_prices.csv"
+    if not path.exists() or path.stat().st_size == 0:
+        row = {
+            "recorded_at": "",
+            "slug": "",
+            "question": "",
+            "elapsed_sec": "",
+            "remaining_sec": "",
+            "up_price": "",
+            "down_price": "",
+            "primary_side": "",
+            "total_spend_usdc": "",
+            "shares_up": "",
+            "shares_down": "",
+            "avg_up": "",
+            "avg_down": "",
+            "pair_sum": "",
+            "dry_run": "",
+        }
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+            writer.writeheader()
+    return path
+
+
+def append_window_price_snapshot(
+    *,
+    path: Path,
+    recorded_at: datetime,
+    slug: str,
+    question: str,
+    elapsed_sec: int,
+    remaining_sec: int,
+    up_price: float,
+    down_price: float,
+    primary_side: str,
+    total_spend_usdc: float,
+    shares_up: int,
+    shares_down: int,
+    avg_up: float,
+    avg_down: float,
+    pair_sum: float,
+    dry_run: bool,
+) -> Path:
+    row = {
+        "recorded_at": recorded_at.isoformat(sep=" ", timespec="seconds"),
+        "slug": slug,
+        "question": question,
+        "elapsed_sec": elapsed_sec,
+        "remaining_sec": remaining_sec,
+        "up_price": round(up_price, 4),
+        "down_price": round(down_price, 4),
+        "primary_side": primary_side,
+        "total_spend_usdc": round(total_spend_usdc, 4),
+        "shares_up": shares_up,
+        "shares_down": shares_down,
+        "avg_up": round(avg_up, 4),
+        "avg_down": round(avg_down, 4),
+        "pair_sum": round(pair_sum, 4),
+        "dry_run": str(dry_run).lower(),
+    }
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        writer.writerow(row)
+    return path
+
+
+def prepare_public_price_snapshot_file(*, slug: str) -> Path:
+    outdir = Path("exports") / "window_price_snapshots_public"
+    outdir.mkdir(parents=True, exist_ok=True)
+    basename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{slug}"
+    path = outdir / f"{basename}_prices.csv"
+    if not path.exists() or path.stat().st_size == 0:
+        row = {
+            "recorded_at": "",
+            "slug": "",
+            "question": "",
+            "elapsed_sec": "",
+            "remaining_sec": "",
+            "up_price": "",
+            "down_price": "",
+            "source": "",
+        }
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+            writer.writeheader()
+    return path
+
+
+def append_public_price_snapshot(
+    *,
+    path: Path,
+    recorded_at: datetime,
+    slug: str,
+    question: str,
+    elapsed_sec: int,
+    remaining_sec: int,
+    up_price: float,
+    down_price: float,
+    source: str = "public_recorder",
+) -> Path:
+    row = {
+        "recorded_at": recorded_at.isoformat(sep=" ", timespec="seconds"),
+        "slug": slug,
+        "question": question,
+        "elapsed_sec": elapsed_sec,
+        "remaining_sec": remaining_sec,
+        "up_price": round(up_price, 4),
+        "down_price": round(down_price, 4),
+        "source": source,
+    }
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        writer.writerow(row)
+    return path
