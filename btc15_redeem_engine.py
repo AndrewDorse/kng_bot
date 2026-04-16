@@ -316,6 +316,9 @@ LEFTOVER_CLEANUP_PRICE = 0.98
 LEFTOVER_CLEANUP_BALANCE_MAX = 5.0
 LEFTOVER_CLEANUP_START_SECONDS_REMAINING = 300.0
 LEFTOVER_CLEANUP_INTERVAL_SECONDS = 5.0
+# Flatten odd-lot inventory: 0 < wallet balance < 2 shares → FAK sell at book-derived price, checked per side on this interval.
+SUB_TWO_SHARE_MAX_EXCLUSIVE = 2.0
+SUB_TWO_SHARE_MARKET_CHECK_SECONDS = 5.0
 EXIT_RECONCILE_INTERVAL_SECONDS = 30.0
 # "current" phase ramp (same as run_named_profiles strategy_0 / price-history replay).
 PHASE_SPEND_CAPS = (
@@ -483,6 +486,7 @@ class Btc15RedeemEngine:
         self._exit_orders_by_side: dict[str, ManagedExitOrder] = {}
         self._fully_exited_sides: set[str] = set()
         self._last_leftover_cleanup_ts: dict[str, float] = {"UP": 0.0, "DOWN": 0.0}
+        self._last_sub_two_market_attempt_ts: dict[str, float] = {"UP": 0.0, "DOWN": 0.0}
 
         self._last_contract: ActiveContract | None = None
         self._last_up_price: float | None = None
@@ -722,6 +726,7 @@ class Btc15RedeemEngine:
         self._poll_btc_price()
         self._poll_prices(contract)
         self._detect_fills(contract, live_ids)
+        self._maybe_market_sell_sub_two_share_inventory(contract)
         self._maybe_volume_scalp_arm_take_profit(contract)
         self._cancel_stale_orders(contract, seconds_remaining)
         self._maybe_retry_window_balance(contract, elapsed, seconds_remaining)
@@ -856,6 +861,7 @@ class Btc15RedeemEngine:
         self._exit_orders_by_side.clear()
         self._fully_exited_sides.clear()
         self._last_leftover_cleanup_ts = {"UP": 0.0, "DOWN": 0.0}
+        self._last_sub_two_market_attempt_ts = {"UP": 0.0, "DOWN": 0.0}
         self._no_signal_reason = ""
         self._balance_retry_attempts_remaining = 0
         self._next_balance_retry_ts = 0.0
@@ -1439,6 +1445,84 @@ class Btc15RedeemEngine:
                     contract.slug,
                     side_label,
                     LEFTOVER_CLEANUP_PRICE,
+                    balance,
+                    exc,
+                )
+
+    def _sub_two_marketable_sell_limit_price(self, token: TokenMarket, side_label: str) -> float:
+        """FAK sell limit: slightly below best bid / last market so the order clears like a market sell."""
+        tid = token.token_id
+        bid = self.trader.get_best_bid(tid)
+        if bid is not None and bid > 0:
+            return round(max(0.01, min(0.99, bid - 0.02)), 2)
+        mpx = self.trader.get_market_price(tid)
+        if mpx is not None and mpx > 0:
+            return round(max(0.01, min(0.99, mpx - 0.05)), 2)
+        last = self._last_up_price if side_label == "UP" else self._last_down_price
+        if last is not None and last > 0:
+            return round(max(0.01, min(0.99, last - 0.05)), 2)
+        return 0.01
+
+    def _maybe_market_sell_sub_two_share_inventory(self, contract: ActiveContract) -> None:
+        """If wallet holds >0 and <2 shares on a side, cancel any resting exit and FAK-sell at book/market (throttled per side)."""
+        if self._strategy_mode_hold_to_redeem():
+            return
+        now = time.time()
+        for side_label, token in (("UP", contract.up), ("DOWN", contract.down)):
+            if now - self._last_sub_two_market_attempt_ts[side_label] < SUB_TWO_SHARE_MARKET_CHECK_SECONDS:
+                continue
+            balance = float(self.trader.token_balance(token.token_id))
+            if balance <= 0.0 or balance >= SUB_TWO_SHARE_MAX_EXCLUSIVE:
+                continue
+
+            self._last_sub_two_market_attempt_ts[side_label] = now
+
+            active = self._exit_orders_by_side.get(side_label)
+            if active is not None:
+                oid = active.order_id
+                if oid in self._order_map:
+                    self._cancel_order_safe(oid, reason="sub2-market-dump")
+                else:
+                    self._cancel_venue_order(oid, reason="sub2-market-dump")
+                self._exit_orders_by_side.pop(side_label, None)
+                self._fully_exited_sides.discard(side_label)
+                LOGGER.info(
+                    "[SUB2 DUMP] %s | side=%s | cancelled resting exit %s before market dump",
+                    contract.slug,
+                    side_label,
+                    oid[:16] if oid else "n/a",
+                )
+                balance = float(self.trader.token_balance(token.token_id))
+                if balance <= 0.0 or balance >= SUB_TWO_SHARE_MAX_EXCLUSIVE:
+                    continue
+
+            px = self._sub_two_marketable_sell_limit_price(token, side_label)
+            if self.config.dry_run:
+                LOGGER.info(
+                    "[DRY SUB2 DUMP] %s | side=%s | limit=$%.2f | shares=%.4f (would FAK sell)",
+                    contract.slug,
+                    side_label,
+                    px,
+                    balance,
+                )
+                continue
+            try:
+                resp = self.trader.place_marketable_sell(token, px, round(balance, 4))
+                order_id = str(resp.get("orderID") or resp.get("id") or "")
+                LOGGER.info(
+                    "[SUB2 DUMP] %s | side=%s | marketable sell limit=$%.2f | shares=%.4f | order=%s",
+                    contract.slug,
+                    side_label,
+                    px,
+                    balance,
+                    order_id[:16] if order_id else "n/a",
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "[SUB2 DUMP FAILED] %s | side=%s | limit=$%.2f | shares=%.4f | %s",
+                    contract.slug,
+                    side_label,
+                    px,
                     balance,
                     exc,
                 )
