@@ -320,6 +320,8 @@ LEFTOVER_CLEANUP_INTERVAL_SECONDS = 5.0
 # Flatten odd-lot window position: 0 < token_delta vs window baseline < 2 sh → FAK sell (per-side throttle below).
 SUB_TWO_SHARE_MAX_EXCLUSIVE = 2.0
 SUB_TWO_SHARE_MARKET_CHECK_SECONDS = 5.0
+# btc_perp15: min seconds between end-window market dump attempts per side (avoid spam).
+BTC_PERP15_END_DUMP_THROTTLE_SECONDS = 2.0
 EXIT_RECONCILE_INTERVAL_SECONDS = 30.0
 # "current" phase ramp (same as run_named_profiles strategy_0 / price-history replay).
 PHASE_SPEND_CAPS = (
@@ -515,6 +517,7 @@ class Btc15RedeemEngine:
         self._perp15_chosen_side: str | None = None
         self._perp15_entry_px: float | None = None
         self._perp15_target_shares: int = 0
+        self._perp15_last_end_dump_ts: dict[str, float] = {"UP": 0.0, "DOWN": 0.0}
 
         self._order_map: dict[str, ManagedOrder] = {}
         self._orders_placed = 0
@@ -751,6 +754,7 @@ class Btc15RedeemEngine:
             not self._strategy_mode_hold_to_redeem() and not self._strategy_mode_signal_only()
         ) or self._strategy_mode_volume_t10() or self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15():
             self._manage_exit_orders(contract, open_orders)
+            self._maybe_btc_perp15_end_window_market_dump(contract, seconds_remaining)
             self._cleanup_small_leftovers(contract, seconds_remaining, time.time())
 
         if (
@@ -918,6 +922,7 @@ class Btc15RedeemEngine:
         self._perp15_chosen_side = None
         self._perp15_entry_px = None
         self._perp15_target_shares = 0
+        self._perp15_last_end_dump_ts = {"UP": 0.0, "DOWN": 0.0}
 
         self._baseline_up_balance = self.trader.token_balance(contract.up.token_id)
         self._baseline_down_balance = self.trader.token_balance(contract.down.token_id)
@@ -1087,7 +1092,8 @@ class Btc15RedeemEngine:
         elif self._strategy_mode_btc_perp15():
             LOGGER.info(
                 "[STRATEGY PARAMS] %s | profile=%s | monitor=%ds sample=%.1fs | abs(btc_trend)>=%.4f | entry [%.2f,%.2f] | "
-                "risk=%.0f%% min_sh=%d | TP=$%.2f | one entry+TP per window; else hold to settlement (no force dump)",
+                "risk=%.0f%% min_sh=%d | TP=$%.2f | T<=%.0fs remaining → market flatten positive position | "
+                "one entry+TP until then; else settlement",
                 contract.slug,
                 self._profile_label(),
                 self.config.btc_perp15_monitor_seconds,
@@ -1098,6 +1104,7 @@ class Btc15RedeemEngine:
                 self.config.btc_perp15_risk_pct * 100.0,
                 self.config.btc_perp15_min_shares,
                 self.config.btc_perp15_tp_price,
+                self.config.btc_perp15_end_dump_seconds_remaining,
             )
         else:
             LOGGER.info(
@@ -1551,6 +1558,9 @@ class Btc15RedeemEngine:
     def _btc_perp15_ensure_tp_limit(self, contract: ActiveContract) -> None:
         if not self._perp15_entry_placed or self._perp15_chosen_side is None:
             return
+        sr = max(0.0, float(contract.end_time.timestamp()) - time.time())
+        if sr <= float(self.config.btc_perp15_end_dump_seconds_remaining):
+            return
         side = self._perp15_chosen_side
         if any(o.side_label == side for o in self._order_map.values()):
             return
@@ -1560,6 +1570,86 @@ class Btc15RedeemEngine:
             return
         tp = round(float(self.config.btc_perp15_tp_price), 2)
         self._ensure_exit_sell(contract, side, tp, purpose="tp")
+
+    def _maybe_btc_perp15_end_window_market_dump(
+        self, contract: ActiveContract, seconds_remaining: float
+    ) -> None:
+        """Last N seconds: if window position > 0 on a side, cancel resting exit and FAK-sell full position size."""
+        if not self._strategy_mode_btc_perp15():
+            return
+        if seconds_remaining > float(self.config.btc_perp15_end_dump_seconds_remaining):
+            return
+        now = time.time()
+        for side_label, token in (("UP", contract.up), ("DOWN", contract.down)):
+            if now - self._perp15_last_end_dump_ts[side_label] < BTC_PERP15_END_DUMP_THROTTLE_SECONDS:
+                continue
+            baseline = self._baseline_up_balance if side_label == "UP" else self._baseline_down_balance
+            position_shares = float(self._token_delta(token, baseline))
+            if position_shares <= 0.0:
+                continue
+
+            self._perp15_last_end_dump_ts[side_label] = now
+
+            active = self._exit_orders_by_side.get(side_label)
+            if active is not None:
+                oid = active.order_id
+                if oid in self._order_map:
+                    self._cancel_order_safe(oid, reason="perp15-end-dump")
+                else:
+                    self._cancel_venue_order(oid, reason="perp15-end-dump")
+                self._exit_orders_by_side.pop(side_label, None)
+                self._fully_exited_sides.discard(side_label)
+                LOGGER.info(
+                    "[PERP15 END DUMP] %s | side=%s | cancelled exit %s before market flatten",
+                    contract.slug,
+                    side_label,
+                    oid[:16] if oid else "n/a",
+                )
+
+            free_wallet = float(self.trader.token_balance(token.token_id))
+            sell_qty = min(max(0.0, free_wallet), position_shares)
+            if sell_qty <= 0.0:
+                LOGGER.debug(
+                    "[PERP15 END DUMP SKIP] %s | side=%s | position=%.4f free_wallet=%.4f",
+                    contract.slug,
+                    side_label,
+                    position_shares,
+                    free_wallet,
+                )
+                continue
+
+            px = self._sub_two_marketable_sell_limit_price(token, side_label)
+            if self.config.dry_run:
+                LOGGER.info(
+                    "[DRY PERP15 END DUMP] %s | side=%s | T-%.0fs | sell=%.4f @ limit=$%.2f",
+                    contract.slug,
+                    side_label,
+                    seconds_remaining,
+                    sell_qty,
+                    px,
+                )
+                continue
+            try:
+                resp = self.trader.place_marketable_sell(token, px, round(sell_qty, 4))
+                order_id = str(resp.get("orderID") or resp.get("id") or "")
+                LOGGER.info(
+                    "[PERP15 END DUMP] %s | side=%s | T-%.0fs | marketable sell=%.4f @ limit=$%.2f | order=%s",
+                    contract.slug,
+                    side_label,
+                    seconds_remaining,
+                    sell_qty,
+                    px,
+                    order_id[:16] if order_id else "n/a",
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "[PERP15 END DUMP FAILED] %s | side=%s | T-%.0fs | sell=%.4f | %s",
+                    contract.slug,
+                    side_label,
+                    seconds_remaining,
+                    sell_qty,
+                    exc,
+                )
 
     def _maintain_passive_maker_orders(
         self,
