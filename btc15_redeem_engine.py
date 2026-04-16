@@ -500,7 +500,7 @@ class Btc15RedeemEngine:
         self._window_open_btc_price: float | None = None
         self._volume_scalp_eligible_next: dict[str, bool] = {"UP": True, "DOWN": True}
         self._volume_scalp_cycle_armed: dict[str, bool] = {"UP": False, "DOWN": False}
-        # Scalp entry hint per side (place/fill); TP uses min(hint, live px, ledger avg) + offset — see _volume_scalp_effective_entry_anchor.
+        # Scalp entry hint per side (place/fill); TP anchor prefers hint, then ledger avg, then live px — never min() with mkt (dip would sell below entry).
         self._volume_scalp_entry_reference_px: dict[str, float | None] = {"UP": None, "DOWN": None}
 
         self._order_map: dict[str, ManagedOrder] = {}
@@ -1397,7 +1397,7 @@ class Btc15RedeemEngine:
                     purpose="tp",
                 )
             loser_side = "DOWN" if ws == "UP" else "UP"
-            if ws in self._fully_exited_sides:
+            if ws in self._fully_exited_sides and not self._strategy_mode_volume_scalp_up():
                 salvage_price = self._desired_exit_price(contract, loser_side, "salvage")
                 self._ensure_exit_sell(contract, loser_side, salvage_price, purpose="salvage")
         self._force_late_exit_cleanup(contract)
@@ -1607,6 +1607,13 @@ class Btc15RedeemEngine:
             LOGGER.warning(
                 "[EXIT SKIP] %s | volume_scalp forbids generic tp (use scalp_tp only)",
                 contract.slug,
+            )
+            return
+        if self._strategy_mode_volume_scalp_up() and purpose == "salvage":
+            LOGGER.info(
+                "[EXIT SKIP] %s | volume_scalp forbids hedge salvage on %s (use scalp_tp only)",
+                contract.slug,
+                side_label,
             )
             return
         if purpose == "scalp_tp" and self._strategy_mode_volume_scalp_up():
@@ -2118,26 +2125,27 @@ class Btc15RedeemEngine:
         return max(0.01, min(raw, 0.50))
 
     def _volume_scalp_effective_entry_anchor(self, side_label: str) -> float | None:
-        """$/sh for TP: min(stored place/fill hint, live last side px, ledger avg). Caps wrong 0.80 when mkt ~0.72."""
-        parts: list[float] = []
+        """$/sh for TP: prefer place/fill hint, else ledger avg, else last side px.
+
+        Do not combine with min() against live mkt: a transient low quote would drag
+        anchor+offset below true entry (e.g. buy ~0.54, TP wrongly ~0.51 instead of ~0.66).
+        """
         stored = self._volume_scalp_entry_reference_px.get(side_label)
         if stored is not None and 0 < float(stored) < 1:
-            parts.append(float(stored))
-        mkt = self._side_price(side_label)
-        if mkt > 0 and mkt < 1:
-            parts.append(float(mkt))
+            return float(stored)
         shares = self._up_shares if side_label == "UP" else self._down_shares
         spend = self._up_spend if side_label == "UP" else self._down_spend
         if shares >= 1 and spend > 0:
             avg = spend / float(shares)
             if 0 < avg < 1:
-                parts.append(float(avg))
-        if not parts:
-            return None
-        return min(parts)
+                return float(avg)
+        mkt = self._side_price(side_label)
+        if mkt > 0 and mkt < 1:
+            return float(mkt)
+        return None
 
     def _volume_scalp_tp_from_buy_limit(self, side_label: str) -> float | None:
-        """TP = effective entry anchor + offset (anchor reconciles stored cap vs market vs ledger)."""
+        """TP = effective entry anchor + offset (anchor from hint, then ledger, then mkt)."""
         if not self._strategy_mode_volume_scalp_up():
             return None
         anchor = self._volume_scalp_effective_entry_anchor(side_label)
