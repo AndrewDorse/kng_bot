@@ -36,7 +36,8 @@ WD_STRATEGY_PROFILE_ID = "WD_wallet_strict_v1"
 VOLUME_T10_STRATEGY_PROFILE_ID = "BTC_VOLUME_T10_dual_v1"
 VOLUME_T10_HYBRID_STRATEGY_PROFILE_ID = "BTC_VOLUME_T10_hybrid_v2"
 VOLUME_SCALP_UP_PROFILE_ID = "BTC_VOLUME_SCALP_UP_v1"
-STRATEGY_PROFILE_ID = AA1_STRATEGY_PROFILE_ID
+BTC_PERP15_PROFILE_ID = "BTC_PERP15_v1"
+STRATEGY_PROFILE_ID = BTC_PERP15_PROFILE_ID
 
 
 def _load_mimic_search_params(path: Path) -> dict[str, float] | None:
@@ -507,6 +508,14 @@ class Btc15RedeemEngine:
         # Scalp entry hint per side (place/fill); TP anchor prefers hint, then ledger avg, then live px — never min() with mkt (dip would sell below entry).
         self._volume_scalp_entry_reference_px: dict[str, float | None] = {"UP": None, "DOWN": None}
 
+        self._perp15_samples: list[tuple[float, float, float]] = []
+        self._perp15_last_sample_ts: float = 0.0
+        self._perp15_monitor_complete: bool = False
+        self._perp15_entry_placed: bool = False
+        self._perp15_chosen_side: str | None = None
+        self._perp15_entry_px: float | None = None
+        self._perp15_target_shares: int = 0
+
         self._order_map: dict[str, ManagedOrder] = {}
         self._orders_placed = 0
         self._fills = 0
@@ -578,6 +587,9 @@ class Btc15RedeemEngine:
             return True
         return False
 
+    def _strategy_mode_btc_perp15(self) -> bool:
+        return self.config.strategy_mode == "btc_perp15"
+
     def _strategy_mode_signal_only(self) -> bool:
         return self.config.strategy_mode == "signal_only"
 
@@ -602,6 +614,8 @@ class Btc15RedeemEngine:
             return VOLUME_T10_STRATEGY_PROFILE_ID
         if self._strategy_mode_volume_scalp_up():
             return VOLUME_SCALP_UP_PROFILE_ID
+        if self._strategy_mode_btc_perp15():
+            return BTC_PERP15_PROFILE_ID
         if self._strategy_mode_signal_only():
             return "SIGNAL_ANALYZER_v1"
         if self._strategy_mode_strategy_0():
@@ -735,13 +749,14 @@ class Btc15RedeemEngine:
         self._maybe_enter_early_exit_mode(contract)
         if (
             not self._strategy_mode_hold_to_redeem() and not self._strategy_mode_signal_only()
-        ) or self._strategy_mode_volume_t10() or self._strategy_mode_volume_scalp_up():
+        ) or self._strategy_mode_volume_t10() or self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15():
             self._manage_exit_orders(contract, open_orders)
             self._cleanup_small_leftovers(contract, seconds_remaining, time.time())
 
         if (
             not self._strategy_mode_hold_to_redeem()
             and not self._strategy_mode_signal_only()
+            and not self._strategy_mode_btc_perp15()
             and seconds_remaining <= self.config.strategy_new_order_cutoff_seconds
         ) or (
             self._strategy_mode_volume_t10()
@@ -751,6 +766,8 @@ class Btc15RedeemEngine:
 
         snapshot = self._build_snapshot()
         self._maybe_record_price_snapshot(contract, snapshot, elapsed, seconds_remaining)
+        if self._strategy_mode_btc_perp15():
+            self._btc_perp15_tick(contract, snapshot, elapsed, seconds_remaining)
         self._maintain_passive_maker_orders(contract, snapshot, elapsed, seconds_remaining)
 
         if not self._has_tradable_budget():
@@ -758,7 +775,7 @@ class Btc15RedeemEngine:
                 f"waiting for balance settlement: budget ${self._window_budget_usdc:.2f} "
                 f"< tradable ${self._minimum_tradable_budget_usdc():.2f}"
             )
-        elif self._tp_phase_started and not self._strategy_mode_hold_to_redeem() and not self._strategy_mode_volume_t10() and not self._strategy_mode_volume_scalp_up():
+        elif self._tp_phase_started and not self._strategy_mode_hold_to_redeem() and not self._strategy_mode_volume_t10() and not self._strategy_mode_volume_scalp_up() and not self._strategy_mode_btc_perp15():
             self._no_signal_reason = "exit mode active"
         elif elapsed >= self.config.strategy_entry_delay_seconds:
             if self._strategy_mode_mimic():
@@ -801,6 +818,8 @@ class Btc15RedeemEngine:
                         self._place_candidate(contract, candidate, snapshot, elapsed)
                 elif self._no_signal_reason:
                     LOGGER.debug("[WAIT] %s | %s", contract.slug, self._no_signal_reason)
+            elif self._strategy_mode_btc_perp15():
+                pass  # entry + TP handled in _btc_perp15_tick / _manage_exit_orders
             elif self._strategy_mode_signal_only():
                 pass  # signal_analyzer thread handles orders
             elif self._strategy_mode_wd():
@@ -892,6 +911,13 @@ class Btc15RedeemEngine:
         self._volume_scalp_eligible_next = {"UP": True, "DOWN": True}
         self._volume_scalp_cycle_armed = {"UP": False, "DOWN": False}
         self._volume_scalp_entry_reference_px = {"UP": None, "DOWN": None}
+        self._perp15_samples = []
+        self._perp15_last_sample_ts = 0.0
+        self._perp15_monitor_complete = False
+        self._perp15_entry_placed = False
+        self._perp15_chosen_side = None
+        self._perp15_entry_px = None
+        self._perp15_target_shares = 0
 
         self._baseline_up_balance = self.trader.token_balance(contract.up.token_id)
         self._baseline_down_balance = self.trader.token_balance(contract.down.token_id)
@@ -1057,6 +1083,21 @@ class Btc15RedeemEngine:
                 self.config.volume_scalp_volume_ratio,
                 self.config.volume_scalp_shares,
                 self.config.volume_scalp_tp_offset,
+            )
+        elif self._strategy_mode_btc_perp15():
+            LOGGER.info(
+                "[STRATEGY PARAMS] %s | profile=%s | monitor=%ds sample=%.1fs | abs(btc_trend)>=%.4f | entry [%.2f,%.2f] | "
+                "risk=%.0f%% min_sh=%d | TP=$%.2f | one entry+TP per window; else hold to settlement (no force dump)",
+                contract.slug,
+                self._profile_label(),
+                self.config.btc_perp15_monitor_seconds,
+                self.config.btc_perp15_sample_interval_seconds,
+                self.config.btc_perp15_btc_trend_threshold,
+                self.config.btc_perp15_entry_min,
+                self.config.btc_perp15_entry_max,
+                self.config.btc_perp15_risk_pct * 100.0,
+                self.config.btc_perp15_min_shares,
+                self.config.btc_perp15_tp_price,
             )
         else:
             LOGGER.info(
@@ -1326,6 +1367,8 @@ class Btc15RedeemEngine:
         stale_seconds = self.config.strategy_stale_order_seconds
         stale_ids: list[tuple[str, str]] = []
         for order_id, order in self._order_map.items():
+            if self._strategy_mode_btc_perp15() and order.reason.startswith("btc_perp15|entry"):
+                continue
             age = now - order.placed_at
             if age < stale_seconds:
                 continue
@@ -1340,7 +1383,7 @@ class Btc15RedeemEngine:
             LOGGER.info("[CANCEL] %s | order=%s | reason=%s", contract.slug, order_id[:16], reason)
 
     def _run_take_profit_phase(self, contract: ActiveContract) -> None:
-        if self._strategy_mode_volume_scalp_up():
+        if self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15():
             return
         raw = (self.config.strategy_mode or "").lower()
         if "scalp" in raw and "volume" in raw and "t10" not in raw:
@@ -1354,6 +1397,169 @@ class Btc15RedeemEngine:
         # L1 simulation holds inventory through the window and does not use
         # early winner-take-all exits.
         return
+
+    def _btc_perp15_compute_shares(self, balance: float, entry: float) -> int | None:
+        """Spec: 10% notional, max(5, int(shares)), cap by balance/entry; also satisfy venue min notional."""
+        c = self.config
+        if entry <= 0 or balance <= 0:
+            return None
+        if balance < entry * float(c.btc_perp15_min_shares):
+            return None
+        if entry < c.btc_perp15_entry_min or entry > c.btc_perp15_entry_max:
+            return None
+        dollar = balance * float(c.btc_perp15_risk_pct)
+        raw_sh = dollar / entry
+        min_notional_sh = int(math.ceil(MIN_MARKETABLE_BUY_NOTIONAL / entry))
+        shares = max(int(c.btc_perp15_min_shares), int(raw_sh), min_notional_sh)
+        max_sh = int(balance / entry)
+        if max_sh < int(c.btc_perp15_min_shares):
+            return None
+        shares = min(shares, max_sh)
+        if shares < 1:
+            return None
+        return shares
+
+    def _btc_perp15_tick(
+        self,
+        contract: ActiveContract,
+        snapshot: BookSnapshot,
+        elapsed: float,
+        seconds_remaining: float,
+    ) -> None:
+        """Monitor UP/DOWN/BTC every sample_interval; after monitor window, enter once then rely on TP + settlement."""
+        now = time.time()
+        mon = float(self.config.btc_perp15_monitor_seconds)
+
+        if elapsed < mon:
+            if (
+                self._last_up_price is not None
+                and self._last_down_price is not None
+                and self._last_btc_price is not None
+                and self._last_up_price > 0
+                and self._last_down_price > 0
+                and self._last_btc_price > 0
+            ):
+                if (
+                    not self._perp15_samples
+                    or now - self._perp15_last_sample_ts >= self.config.btc_perp15_sample_interval_seconds
+                ):
+                    self._perp15_samples.append(
+                        (float(self._last_up_price), float(self._last_down_price), float(self._last_btc_price))
+                    )
+                    self._perp15_last_sample_ts = now
+            return
+
+        if self._perp15_monitor_complete:
+            return
+        self._perp15_monitor_complete = True
+
+        if not self._perp15_samples:
+            LOGGER.warning("[PERP15] %s | no samples in monitor phase; skip window", contract.slug)
+            return
+
+        min_up = min(p[0] for p in self._perp15_samples)
+        min_down = min(p[1] for p in self._perp15_samples)
+        b0 = float(self._perp15_samples[0][2])
+        b1 = float(self._perp15_samples[-1][2])
+        if b0 > 0:
+            btc_trend = (b1 - b0) / b0
+        else:
+            btc_trend = 0.0
+
+        thr = float(self.config.btc_perp15_btc_trend_threshold)
+        if abs(btc_trend) >= thr:
+            side = "UP" if btc_trend > 0 else "DOWN"
+        else:
+            side = "UP" if min_up <= min_down else "DOWN"
+        entry = min_up if side == "UP" else min_down
+
+        emin = float(self.config.btc_perp15_entry_min)
+        emax = float(self.config.btc_perp15_entry_max)
+        if entry < emin or entry > emax:
+            LOGGER.info(
+                "[PERP15] %s | skip entry out of range side=%s entry=$%.4f (need [%.2f,%.2f]) | min_up=$%.4f min_dn=$%.4f btc_trend=%+.5f",
+                contract.slug,
+                side,
+                entry,
+                emin,
+                emax,
+                min_up,
+                min_down,
+                btc_trend,
+            )
+            return
+
+        balance = float(self._window_budget_usdc)
+        if balance < entry * int(self.config.btc_perp15_min_shares):
+            LOGGER.info(
+                "[PERP15] %s | skip insufficient budget $%.2f for min %d sh @ $%.4f",
+                contract.slug,
+                balance,
+                int(self.config.btc_perp15_min_shares),
+                entry,
+            )
+            return
+
+        shares = self._btc_perp15_compute_shares(balance, entry)
+        if shares is None:
+            LOGGER.info("[PERP15] %s | skip position size / notional (budget=$%.2f entry=$%.4f)", contract.slug, balance, entry)
+            return
+
+        cost = entry * float(shares)
+        if balance < cost:
+            LOGGER.info("[PERP15] %s | skip cost $%.2f > budget $%.2f", contract.slug, cost, balance)
+            return
+
+        LOGGER.info(
+            "[PERP15] %s | DECISION side=%s entry=$%.4f sh=%d (~$%.2f) | min_up=$%.4f min_dn=$%.4f btc_trend=%+.5f samples=%d",
+            contract.slug,
+            side,
+            entry,
+            shares,
+            cost,
+            min_up,
+            min_down,
+            btc_trend,
+            len(self._perp15_samples),
+        )
+
+        if seconds_remaining <= float(self.config.strategy_new_order_cutoff_seconds):
+            LOGGER.warning("[PERP15] %s | skip past new-order cutoff (remaining=%.0fs)", contract.slug, seconds_remaining)
+            return
+
+        candidate = OrderCandidate(
+            side_label=side,
+            kind="primary",
+            reference_price=float(entry),
+            limit_ceiling=min(0.99, float(entry) + 0.08),
+            reason=f"btc_perp15|entry|side={side}",
+            shares=int(shares),
+            execution_style="taker_best_ask",
+        )
+        open_orders = self._get_contract_orders(contract)
+        if not self._can_place_candidate(snapshot, candidate, open_orders, elapsed):
+            LOGGER.warning("[PERP15] %s | cannot place entry: %s", contract.slug, self._no_signal_reason)
+            return
+        if not self._place_candidate(contract, candidate, snapshot, elapsed):
+            return
+
+        self._perp15_chosen_side = side
+        self._perp15_entry_px = float(entry)
+        self._perp15_target_shares = int(shares)
+        self._perp15_entry_placed = True
+
+    def _btc_perp15_ensure_tp_limit(self, contract: ActiveContract) -> None:
+        if not self._perp15_entry_placed or self._perp15_chosen_side is None:
+            return
+        side = self._perp15_chosen_side
+        if any(o.side_label == side for o in self._order_map.values()):
+            return
+        token = contract.up if side == "UP" else contract.down
+        bal = float(self.trader.token_balance(token.token_id))
+        if bal < 1.0:
+            return
+        tp = round(float(self.config.btc_perp15_tp_price), 2)
+        self._ensure_exit_sell(contract, side, tp, purpose="tp")
 
     def _maintain_passive_maker_orders(
         self,
@@ -1385,12 +1591,16 @@ class Btc15RedeemEngine:
             LOGGER.info("[EARLY EXIT] %s | winner_side=%s", contract.slug, winner_side)
 
     def _manage_exit_orders(self, contract: ActiveContract, open_orders: list[dict[str, Any]]) -> None:
-        if not self._tp_phase_started and not self._strategy_mode_volume_scalp_up():
+        if not self._tp_phase_started and not self._strategy_mode_volume_scalp_up() and not self._strategy_mode_btc_perp15():
             return
 
         open_ids = self._extract_live_ids(open_orders)
         self._refresh_exit_orders(contract, open_ids)
         self._reconcile_exit_orders(contract, open_ids)
+
+        if self._strategy_mode_btc_perp15():
+            self._btc_perp15_ensure_tp_limit(contract)
+            return
 
         if self._exit_mode_winner_side is not None:
             ws = self._exit_mode_winner_side
@@ -1409,7 +1619,7 @@ class Btc15RedeemEngine:
         self._force_late_exit_cleanup(contract)
 
     def _cleanup_small_leftovers(self, contract: ActiveContract, seconds_remaining: float, now: float) -> None:
-        if self._strategy_mode_volume_scalp_up():
+        if self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15():
             return
         if seconds_remaining > LEFTOVER_CLEANUP_START_SECONDS_REMAINING:
             return
@@ -1605,6 +1815,8 @@ class Btc15RedeemEngine:
         best_bid = self.trader.get_best_bid(token.token_id)
 
         if purpose == "tp":
+            if self._strategy_mode_btc_perp15():
+                return round(float(self.config.btc_perp15_tp_price), 2)
             return TP_PRICE
 
         if best_bid is not None and best_bid > 0:
@@ -1650,7 +1862,7 @@ class Btc15RedeemEngine:
             )
 
     def _force_late_exit_cleanup(self, contract: ActiveContract) -> None:
-        if self._strategy_mode_volume_scalp_up():
+        if self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15():
             return
         seconds_remaining = max(0.0, contract.end_time.timestamp() - time.time())
         if seconds_remaining > self.config.force_exit_before_end_seconds:
@@ -3573,7 +3785,7 @@ class Btc15RedeemEngine:
         ), "maker"
 
     def _phase_cap_usdc(self, elapsed: float) -> float:
-        if self._strategy_mode_volume_t10() or self._strategy_mode_volume_scalp_up():
+        if self._strategy_mode_volume_t10() or self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15():
             return self._window_budget_usdc
         for upper_bound, share in PHASE_SPEND_CAPS:
             if elapsed <= upper_bound:
