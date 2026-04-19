@@ -31,8 +31,8 @@ class BotConfigError(RuntimeError):
 
 
 def _normalize_strategy_mode(raw: str | None) -> str:
-    """Canonicalize strategy_mode so volume-scalp variants always match engine guards (avoids late $0.99 TP)."""
-    s = (raw or "wd").strip().lower()
+    """Canonicalize strategy_mode so strategy aliases always match engine guards."""
+    s = (raw or "champ4_6s").strip().lower()
     for ch in ("\r", "\n", "\t"):
         s = s.replace(ch, "")
     s = s.replace("-", "_")
@@ -41,6 +41,8 @@ def _normalize_strategy_mode(raw: str | None) -> str:
         return "btc_perp15"
     if s in ("volume_scalp_up", "volume_scalp", "vol_scalp_up"):
         return "volume_scalp_up"
+    if s in ("champ4_6s", "champ4", "champ4_live", "wallet_dual", "wallet_dual_live"):
+        return "champ4_6s"
     if "t10" in s:
         return s
     if "scalp" in s and "volume" in s:
@@ -66,7 +68,7 @@ class BotConfig:
     force_exit_before_end_seconds: int = 15
     # Ladder config
     ladder_prices: list = field(default_factory=lambda: [0.44, 0.34, 0.24, 0.14])
-    shares_per_level: int = 5
+    shares_per_level: int = 6
     order_cooldown_seconds: float = 3.0
     hedge_offset: float = 0.02
     market_symbol: str = "BTC"
@@ -76,7 +78,7 @@ class BotConfig:
     strategy_budget_cap_usdc: float = 80.0
     strategy_wallet_reserve_usdc: float = 0.0
     strategy_min_budget_usdc: float = 15.0
-    strategy_entry_delay_seconds: int = 35
+    strategy_entry_delay_seconds: int = 24
     strategy_new_order_cutoff_seconds: int = 30
     strategy_fill_grace_seconds: float = 5.0
     strategy_stale_order_seconds: float = 20.0
@@ -99,25 +101,28 @@ class BotConfig:
     btc_feed_poll_seconds: float = 1.0
     btc_feed_symbol: str = "BTCUSDT"
     signal_preset: str = "w1"
-    # strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
-    strategy_mode: str = "btc_perp15"
-    # volume scalp: TP = min(stored hint, last side px, ledger avg) + offset (notional on ManagedOrder is not fill).
+    # champ4_6s | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
+    strategy_mode: str = "champ4_6s"
+    # volume scalp: fixed-lot directional entries with one shared TP per held side plus stop/time-exit risk control.
     volume_scalp_tp_offset: float = 0.12
+    volume_scalp_stop_offset: float = 0.05
     volume_scalp_shares: int = 6
+    volume_scalp_max_orders_per_side: int = 3
     volume_scalp_entry_min_elapsed: int = 60
     volume_scalp_entry_max_elapsed: int = 840
+    volume_scalp_time_exit_seconds_remaining: int = 60
     volume_scalp_volume_ratio: float = 2.5
-    # BTC 15m perpetual-style: monitor mins + BTC trend, one entry, TP @ 0.99, else hold to settlement.
-    btc_perp15_monitor_seconds: int = 180
-    btc_perp15_btc_trend_threshold: float = 0.002
-    btc_perp15_entry_min: float = 0.05
-    btc_perp15_entry_max: float = 0.85
+    # BTC 15m perp ladder: UP-only, early BTC trend gate, passive entry ladder.
+    btc_perp15_monitor_seconds: int = 120
+    btc_perp15_btc_trend_threshold: float = 0.0005
+    btc_perp15_entry_window_seconds: int = 420
+    btc_perp15_ladder_prices: list[float] = field(default_factory=lambda: [0.44, 0.43, 0.40])
     btc_perp15_min_shares: int = 6
     btc_perp15_risk_pct: float = 0.10
     btc_perp15_tp_price: float = 0.99
     btc_perp15_sample_interval_seconds: float = 5.0
     # When T-remaining <= this, flatten any positive window position with a marketable sell (btc_perp15 only).
-    btc_perp15_end_dump_seconds_remaining: float = 30.0
+    btc_perp15_end_dump_seconds_remaining: float = 15.0
 
     @property
     def window_size_seconds(self) -> int:
@@ -163,6 +168,11 @@ class BotConfig:
         volume_scalp_tp_raw = _env_float("BOT_VOLUME_SCALP_TP_OFFSET", 0.12)
         if volume_scalp_tp_raw > 1.0:
             volume_scalp_tp_raw = volume_scalp_tp_raw / 100.0
+        raw_perp15_ladder = os.getenv("BOT_PERP15_LADDER_PRICES", "").strip()
+        if raw_perp15_ladder:
+            perp15_ladder = sorted({float(p.strip()) for p in raw_perp15_ladder.split(",") if p.strip()}, reverse=True)
+        else:
+            perp15_ladder = [0.44, 0.43, 0.40]
 
         return cls(
             private_key=private_key,
@@ -177,7 +187,7 @@ class BotConfig:
             request_timeout_seconds=_env_float("BOT_REQUEST_TIMEOUT_SECONDS", 10.0),
             log_level=os.getenv("BOT_LOG_LEVEL", "INFO").upper(),
             force_exit_before_end_seconds=_env_int("BOT_FORCE_EXIT_BEFORE_END_SECONDS", 15),
-            shares_per_level=max(1, _env_int("BOT_SHARES_PER_LEVEL", 5)),
+            shares_per_level=max(1, _env_int("BOT_SHARES_PER_LEVEL", 6)),
             ladder_prices=ladder_prices,
             order_cooldown_seconds=_env_float("BOT_ORDER_COOLDOWN_SECONDS", 3.0),
             hedge_offset=_env_float("BOT_HEDGE_OFFSET", 0.02),
@@ -188,7 +198,7 @@ class BotConfig:
             strategy_budget_cap_usdc=_env_float("BOT_STRATEGY_BUDGET_CAP_USDC", 80.0),
             strategy_wallet_reserve_usdc=_env_float("BOT_STRATEGY_WALLET_RESERVE_USDC", 0.0),
             strategy_min_budget_usdc=_env_float("BOT_STRATEGY_MIN_BUDGET_USDC", 15.0),
-            strategy_entry_delay_seconds=_env_int("BOT_STRATEGY_ENTRY_DELAY_SECONDS", 35),
+            strategy_entry_delay_seconds=_env_int("BOT_STRATEGY_ENTRY_DELAY_SECONDS", 24),
             strategy_new_order_cutoff_seconds=_env_int("BOT_STRATEGY_NEW_ORDER_CUTOFF_SECONDS", 30),
             strategy_fill_grace_seconds=_env_float("BOT_STRATEGY_FILL_GRACE_SECONDS", 5.0),
             strategy_stale_order_seconds=_env_float("BOT_STRATEGY_STALE_ORDER_SECONDS", 20.0),
@@ -211,21 +221,24 @@ class BotConfig:
             btc_feed_poll_seconds=_env_float("BOT_BTC_FEED_POLL_SECONDS", 1.0),
             btc_feed_symbol=os.getenv("BOT_BTC_FEED_SYMBOL", "BTCUSDT").upper(),
             signal_preset=os.getenv("BOT_SIGNAL_PRESET", "w1").strip().lower(),
-            strategy_mode=_normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "btc_perp15")),
+            strategy_mode=_normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "champ4_6s")),
             volume_scalp_tp_offset=volume_scalp_tp_raw,
+            volume_scalp_stop_offset=_env_float("BOT_VOLUME_SCALP_STOP_OFFSET", 0.05),
             volume_scalp_shares=max(1, _env_int("BOT_VOLUME_SCALP_SHARES", 6)),
+            volume_scalp_max_orders_per_side=max(1, _env_int("BOT_VOLUME_SCALP_MAX_ORDERS_PER_SIDE", 3)),
             volume_scalp_entry_min_elapsed=max(0, _env_int("BOT_VOLUME_SCALP_ENTRY_MIN_ELAPSED", 60)),
             volume_scalp_entry_max_elapsed=max(1, _env_int("BOT_VOLUME_SCALP_ENTRY_MAX_ELAPSED", 840)),
+            volume_scalp_time_exit_seconds_remaining=max(1, _env_int("BOT_VOLUME_SCALP_TIME_EXIT_SECONDS_REMAINING", 60)),
             volume_scalp_volume_ratio=_env_float("BOT_VOLUME_SCALP_VOLUME_RATIO", 2.5),
-            btc_perp15_monitor_seconds=max(30, _env_int("BOT_PERP15_MONITOR_SECONDS", 180)),
-            btc_perp15_btc_trend_threshold=_env_float("BOT_PERP15_BTC_TREND_THRESHOLD", 0.002),
-            btc_perp15_entry_min=_env_float("BOT_PERP15_ENTRY_MIN", 0.05),
-            btc_perp15_entry_max=_env_float("BOT_PERP15_ENTRY_MAX", 0.85),
+            btc_perp15_monitor_seconds=max(30, _env_int("BOT_PERP15_MONITOR_SECONDS", 120)),
+            btc_perp15_btc_trend_threshold=_env_float("BOT_PERP15_BTC_TREND_THRESHOLD", 0.0005),
+            btc_perp15_entry_window_seconds=max(60, _env_int("BOT_PERP15_ENTRY_WINDOW_SECONDS", 420)),
+            btc_perp15_ladder_prices=perp15_ladder,
             btc_perp15_min_shares=max(1, _env_int("BOT_PERP15_MIN_SHARES", 6)),
             btc_perp15_risk_pct=_env_float("BOT_PERP15_RISK_PCT", 0.10),
             btc_perp15_tp_price=_env_float("BOT_PERP15_TP_PRICE", 0.99),
             btc_perp15_sample_interval_seconds=_env_float("BOT_PERP15_SAMPLE_INTERVAL_SECONDS", 5.0),
-            btc_perp15_end_dump_seconds_remaining=max(1.0, _env_float("BOT_PERP15_END_DUMP_SECONDS_REMAINING", 30.0)),
+            btc_perp15_end_dump_seconds_remaining=max(1.0, _env_float("BOT_PERP15_END_DUMP_SECONDS_REMAINING", 15.0)),
         )
 
 

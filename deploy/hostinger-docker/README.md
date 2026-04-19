@@ -42,7 +42,7 @@ Before switching out of dry-run:
 
 - verify all secrets are set in Hostinger
 - keep `POLY_DRY_RUN=true` for the first deployment
-- check logs for market discovery, BTC polling, and `volume_t10_hybrid` strategy startup
+- check logs for market discovery, BTC polling, and `champ4_6s` strategy startup
 - only then flip `POLY_DRY_RUN=false`
 
 ## Environment Variables
@@ -77,7 +77,16 @@ Recommended:
 
 ## Strategy Note
 
-The deployment example defaults to `BOT_STRATEGY_MODE=btc_perp15` (BTC 15m perpetual-style: monitor window, one entry, **TP at `BOT_PERP15_TP_PRICE` default 0.99**).
+The deployment example now defaults to `BOT_STRATEGY_MODE=champ4_6s` with `BOT_SHARES_PER_LEVEL=6`.
+
+`champ4_6s` is a hold-to-redeem dual-side hedge profile:
+
+- opens both sides in every window
+- builds using 6-share clips
+- follows BTC direction for the main side
+- keeps the opposite side as a live hedge
+
+If you want the older perpetual-style runner instead, set `BOT_STRATEGY_MODE=btc_perp15` manually.
 
 For **`volume_scalp_up`**, TP is **not** fixed at 0.99: it is entry anchor + `BOT_VOLUME_SCALP_TP_OFFSET` (capped at 0.99). If you set `BOT_VOLUME_SCALP_TP_OFFSET=10`, that means **+10¢** (normalized from cents).
 
