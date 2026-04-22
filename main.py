@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BTC 15-minute bot entry point. Default strategy: PALADIN v4 pair-only live (see paladin_live_engine.py)."""
+"""BTC 15-minute bot entry point. Default strategy: PALADIN v7 Binance-spike live (see paladin_v7_live_engine.py)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from btc15_redeem_engine import Btc15RedeemEngine
 from config import BotConfig, BotConfigError, LOGGER, configure_logging
 from market_locator import GammaMarketLocator
 from paladin_live_engine import PaladinLiveEngine
+from paladin_v7_live_engine import PaladinV7LiveEngine
 from signal_analyzer import SignalAnalyzer
 from trader import PolymarketTrader
 
@@ -41,13 +42,28 @@ def main() -> int:
         LOGGER.info("strategy_id  = %s", "BTC_PERP15_UP_LADDER_v3")
     elif config.strategy_mode == "signal_only":
         LOGGER.info("signal_preset= %s", config.signal_preset)
+    elif config.strategy_mode == "paladin_v7":
+        LOGGER.info("strategy_id  = %s", "PALADIN_v7_binance_spike_live")
+        LOGGER.info("poly_ws      = %s (%s)", config.polymarket_ws_enabled, config.polymarket_ws_url)
+        LOGGER.info(
+            "paladin_v7   = budget=$%.2f clip=%.1f max/side=%.0f max_orders=%d vol_ratio=%.2f lookback=%ds btc_move>=%.2f",
+            float(config.strategy_budget_cap_usdc),
+            float(config.paladin_v7_clip_shares),
+            float(config.paladin_v7_max_shares_per_side),
+            int(config.paladin_v7_max_orders),
+            float(config.paladin_v7_volume_spike_ratio),
+            int(config.paladin_v7_volume_lookback_sec),
+            float(config.paladin_v7_btc_abs_move_min_usd),
+        )
     elif config.strategy_mode == "paladin":
         LOGGER.info("strategy_id  = %s", "PALADIN_pair_live_v4")
         LOGGER.info("poly_ws      = %s (%s)", config.polymarket_ws_enabled, config.polymarket_ws_url)
         LOGGER.info("fak_confirm  = %s (GET /order after FAK when needed)", config.polymarket_fak_confirm_get_order)
+        pforce = config.paladin_pair_sum_max_on_forced_hedge
         LOGGER.info(
-            "paladin_pair = sum<=%.3f | min_marginal_roi=%.3f (2nd leg; 1st leg mid<=%.3f)",
+            "paladin_pair = 2nd_leg_sum<=%.3f | hedge_timer_2nd_sum<=%s | roi>=%.3f on 2nd | 1st_leg_side<=%.3f",
             config.paladin_pair_sum_max,
+            f"{pforce:.3f}" if pforce is not None else "strict",
             config.paladin_target_min_roi,
             config.paladin_first_leg_max_px,
         )
@@ -97,6 +113,14 @@ def main() -> int:
 
     locator = GammaMarketLocator(config)
     trader = PolymarketTrader(config)
+
+    if config.strategy_mode == "paladin_v7":
+        if config.dry_run:
+            LOGGER.warning("PALADIN v7: POLY_DRY_RUN=true — paper only (no CLOB orders).")
+        else:
+            LOGGER.warning("PALADIN v7: LIVE — FAK buys will execute on Polymarket. Ctrl+C stops the loop.")
+        PaladinV7LiveEngine(config, locator, trader).run()
+        return 0
 
     if config.strategy_mode == "paladin":
         if config.dry_run:

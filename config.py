@@ -73,6 +73,8 @@ def _normalize_strategy_mode(raw: str | None) -> str:
         return "champ4_6s"
     if s in ("paladin", "paladin_live", "paladin_pair"):
         return "paladin"
+    if s in ("paladin_v7", "paladin7", "paladin_v7_live", "kng3", "kng3_live"):
+        return "paladin_v7"
     if s in ("iy2", "iy_2", "wallet_overlap", "wallet_overlap_live", "iy2_live"):
         return "iy2"
     if s in ("iy3", "iy_3", "wallet_overlap_path", "wallet_overlap_path_live", "iy3_live"):
@@ -135,8 +137,8 @@ class BotConfig:
     btc_feed_poll_seconds: float = 1.0
     btc_feed_symbol: str = "BTCUSDT"
     signal_preset: str = "w1"
-    # paladin | champ4_6s | iy2 | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
-    strategy_mode: str = "paladin"
+    # paladin | paladin_v7 | champ4_6s | iy2 | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
+    strategy_mode: str = "paladin_v7"
     # volume scalp: fixed-lot directional entries with one shared TP per held side plus stop/time-exit risk control.
     volume_scalp_tp_offset: float = 0.12
     volume_scalp_stop_offset: float = 0.05
@@ -163,10 +165,10 @@ class BotConfig:
     polymarket_fak_confirm_get_order: bool = True
     # PALADIN live (pair-only): marginal ROI gate on each symmetric add is often stricter than pair_sum_max.
     # Empty-book approx: need (pm_u+pm_d) <= 1/(1+target_min_roi). At 3% => sum<=0.971; at 2% => sum<=0.980.
-    # Default 0.97: do not open/complete on a $1.00 book until optional forced-hedge cap (below).
+    # Default 0.97: stagger *second* leg waits for pm_up+pm_down <= this (first leg uses single-side max only);
+    # non-forced second leg uses this cap; hedge-force timer can relax via paladin_pair_sum_max_on_forced_hedge.
     paladin_pair_sum_max: float = 0.97
-    # After stagger hedge-force timer, discipline may allow pair mids up to this (e.g. 1.0) to finish the leg.
-    # None or <=0: stay strict at paladin_pair_sum_max even on force (can leave imbalance).
+    # After hedge-force timer: second leg may complete if mid sum <= this (default 1.0 = any valid book).
     paladin_pair_sum_max_on_forced_hedge: float | None = 1.0
     # Calibrated ladder (PALADIN/calibrate_ladder_wallet_windows.py): target_min_roi=0 matches 100-window sim.
     paladin_target_min_roi: float = 0.0
@@ -174,8 +176,8 @@ class BotConfig:
     # Staggered pair: first FAK on cheaper side if mid <= this; complete pair when sum+ROI allow.
     paladin_stagger_pair: bool = True
     paladin_first_leg_max_px: float = 0.55
-    # Sim/live: if stagger 2nd leg waits longer than this (seconds after hedge-ready), buy at mid anyway.
-    # 90s matches PALADIN A/B variant E (strict 0.97 blend + calmer forced hedge).
+    # Sim/live: after this many seconds past hedge-ready, force the 2nd leg (ROI gate skipped; pair-sum cap uses
+    # paladin_pair_sum_max_on_forced_hedge, default 1.0). 90s matches PALADIN A/B variant E.
     paladin_stagger_hedge_force_after_seconds: float | None = 90.0
     # Cap inventory per outcome side (None / <=0 = no cap). PALADIN v4 live default: 10/side (override via env).
     paladin_max_shares_per_side: float | None = 10.0
@@ -205,6 +207,24 @@ class BotConfig:
     paladin_min_elapsed_between_pair_starts: float | None = 100.0
     paladin_entry_trailing_min_low_seconds: int | None = None
     paladin_entry_trailing_low_slippage: float = 0.02
+    # PALADIN v7 live (Binance volume spike + BTC impulse → PM legs; small-budget preset by default)
+    paladin_v7_volume_lookback_sec: int = 60
+    paladin_v7_volume_spike_ratio: float = 2.5
+    paladin_v7_volume_floor: float = 1e-6
+    paladin_v7_btc_abs_move_min_usd: float = 2.0
+    paladin_v7_first_leg_max_pm: float = 0.62
+    paladin_v7_cheap_other_margin: float = 0.04
+    paladin_v7_cheap_pair_sum_max: float = 0.99
+    paladin_v7_hedge_timeout_seconds: float = 90.0
+    paladin_v7_forced_hedge_max_book_sum: float = 1.04
+    paladin_v7_refill_clip_fraction: float = 0.5
+    paladin_v7_refill_max_pair_sum: float = 0.985
+    paladin_v7_pair_cooldown_sec: float = 20.0
+    paladin_v7_clip_shares: float = 5.0
+    paladin_v7_max_shares_per_side: float = 10.0
+    paladin_v7_max_orders: int = 4
+    paladin_v7_min_notional: float = 1.0
+    paladin_v7_min_shares: float = 5.0
 
     @property
     def window_size_seconds(self) -> int:
@@ -257,10 +277,13 @@ class BotConfig:
         else:
             perp15_ladder = [0.44, 0.43, 0.40]
 
+        raw_mode = _normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "paladin_v7"))
+        default_strategy_budget = 10.0 if raw_mode == "paladin_v7" else 80.0
+
         return cls(
             private_key=private_key.strip(),
             funder=funder,
-            bot_version=os.getenv("BOT_VERSION", "paladin-v4-10sh-hedge90-blend097-2026-04-21").strip(),
+            bot_version=os.getenv("BOT_VERSION", "paladin-v7-binance-spike-2026-04-21").strip(),
             signature_type=_env_int("POLY_SIGNATURE_TYPE", 1),
             relayer_api_key=os.getenv("RELAYER_API_KEY", ""),
             relayer_secret=os.getenv("RELAYER_SECRET", ""),
@@ -278,7 +301,7 @@ class BotConfig:
             window_minutes=_env_int("BOT_WINDOW_MINUTES", 15),
             window_pick_current_grace_seconds=_env_int("BOT_WINDOW_PICK_CURRENT_GRACE_SECONDS", 300),
             trade_one_window=_env_bool("BOT_TRADE_ONE_WINDOW", False),
-            strategy_budget_cap_usdc=_env_float("BOT_STRATEGY_BUDGET_CAP_USDC", 80.0),
+            strategy_budget_cap_usdc=_env_float("BOT_STRATEGY_BUDGET_CAP_USDC", default_strategy_budget),
             strategy_wallet_reserve_usdc=_env_float("BOT_STRATEGY_WALLET_RESERVE_USDC", 0.0),
             strategy_min_budget_usdc=_env_float("BOT_STRATEGY_MIN_BUDGET_USDC", 15.0),
             strategy_entry_delay_seconds=max(0, _env_int("BOT_STRATEGY_ENTRY_DELAY_SECONDS", 0)),
@@ -304,7 +327,7 @@ class BotConfig:
             btc_feed_poll_seconds=_env_float("BOT_BTC_FEED_POLL_SECONDS", 1.0),
             btc_feed_symbol=os.getenv("BOT_BTC_FEED_SYMBOL", "BTCUSDT").upper(),
             signal_preset=os.getenv("BOT_SIGNAL_PRESET", "w1").strip().lower(),
-            strategy_mode=_normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "paladin")),
+            strategy_mode=raw_mode,
             volume_scalp_tp_offset=volume_scalp_tp_raw,
             volume_scalp_stop_offset=_env_float("BOT_VOLUME_SCALP_STOP_OFFSET", 0.05),
             volume_scalp_shares=max(1, _env_int("BOT_VOLUME_SCALP_SHARES", 6)),
@@ -401,6 +424,25 @@ class BotConfig:
             paladin_entry_trailing_low_slippage=_env_float(
                 "BOT_PALADIN_ENTRY_TRAILING_LOW_SLIPPAGE", 0.02
             ),
+            paladin_v7_volume_lookback_sec=max(5, _env_int("BOT_PALADIN_V7_VOL_LOOKBACK_SEC", 60)),
+            paladin_v7_volume_spike_ratio=max(1.01, _env_float("BOT_PALADIN_V7_VOL_SPIKE_RATIO", 2.5)),
+            paladin_v7_volume_floor=max(0.0, _env_float("BOT_PALADIN_V7_VOL_FLOOR", 1e-6)),
+            paladin_v7_btc_abs_move_min_usd=max(0.0, _env_float("BOT_PALADIN_V7_BTC_MOVE_MIN_USD", 2.0)),
+            paladin_v7_first_leg_max_pm=min(0.99, max(0.01, _env_float("BOT_PALADIN_V7_FIRST_LEG_MAX_PM", 0.62))),
+            paladin_v7_cheap_other_margin=max(0.0, _env_float("BOT_PALADIN_V7_CHEAP_OTHER_MARGIN", 0.04)),
+            paladin_v7_cheap_pair_sum_max=min(1.0, _env_float("BOT_PALADIN_V7_CHEAP_PAIR_SUM_MAX", 0.99)),
+            paladin_v7_hedge_timeout_seconds=max(1.0, _env_float("BOT_PALADIN_V7_HEDGE_TIMEOUT_SEC", 90.0)),
+            paladin_v7_forced_hedge_max_book_sum=min(
+                1.05, max(1.0, _env_float("BOT_PALADIN_V7_FORCED_HEDGE_SUM_MAX", 1.04))
+            ),
+            paladin_v7_refill_clip_fraction=min(1.0, max(0.1, _env_float("BOT_PALADIN_V7_REFILL_CLIP_FRAC", 0.5))),
+            paladin_v7_refill_max_pair_sum=min(1.0, _env_float("BOT_PALADIN_V7_REFILL_PAIR_SUM_MAX", 0.985)),
+            paladin_v7_pair_cooldown_sec=max(0.0, _env_float("BOT_PALADIN_V7_PAIR_COOLDOWN_SEC", 20.0)),
+            paladin_v7_clip_shares=max(1.0, _env_float("BOT_PALADIN_V7_CLIP_SHARES", 5.0)),
+            paladin_v7_max_shares_per_side=max(1.0, _env_float("BOT_PALADIN_V7_MAX_SHARES_PER_SIDE", 10.0)),
+            paladin_v7_max_orders=max(0, _env_int("BOT_PALADIN_V7_MAX_ORDERS", 4)),
+            paladin_v7_min_notional=max(0.01, _env_float("BOT_PALADIN_V7_MIN_NOTIONAL", 1.0)),
+            paladin_v7_min_shares=max(1.0, _env_float("BOT_PALADIN_V7_MIN_SHARES", 5.0)),
         )
 
 
