@@ -112,7 +112,7 @@ class BotConfig:
     strategy_budget_cap_usdc: float = 80.0
     strategy_wallet_reserve_usdc: float = 0.0
     strategy_min_budget_usdc: float = 15.0
-    strategy_entry_delay_seconds: int = 24
+    strategy_entry_delay_seconds: int = 0
     strategy_new_order_cutoff_seconds: int = 30
     strategy_fill_grace_seconds: float = 5.0
     strategy_stale_order_seconds: float = 8.0
@@ -163,7 +163,11 @@ class BotConfig:
     polymarket_fak_confirm_get_order: bool = True
     # PALADIN live (pair-only): marginal ROI gate on each symmetric add is often stricter than pair_sum_max.
     # Empty-book approx: need (pm_u+pm_d) <= 1/(1+target_min_roi). At 3% => sum<=0.971; at 2% => sum<=0.980.
-    paladin_pair_sum_max: float = 1.0
+    # Default 0.97: do not open/complete on a $1.00 book until optional forced-hedge cap (below).
+    paladin_pair_sum_max: float = 0.97
+    # After stagger hedge-force timer, discipline may allow pair mids up to this (e.g. 1.0) to finish the leg.
+    # None or <=0: stay strict at paladin_pair_sum_max even on force (can leave imbalance).
+    paladin_pair_sum_max_on_forced_hedge: float | None = 1.0
     # Calibrated ladder (PALADIN/calibrate_ladder_wallet_windows.py): target_min_roi=0 matches 100-window sim.
     paladin_target_min_roi: float = 0.0
     paladin_heartbeat_seconds: float = 15.0
@@ -277,7 +281,7 @@ class BotConfig:
             strategy_budget_cap_usdc=_env_float("BOT_STRATEGY_BUDGET_CAP_USDC", 80.0),
             strategy_wallet_reserve_usdc=_env_float("BOT_STRATEGY_WALLET_RESERVE_USDC", 0.0),
             strategy_min_budget_usdc=_env_float("BOT_STRATEGY_MIN_BUDGET_USDC", 15.0),
-            strategy_entry_delay_seconds=_env_int("BOT_STRATEGY_ENTRY_DELAY_SECONDS", 24),
+            strategy_entry_delay_seconds=max(0, _env_int("BOT_STRATEGY_ENTRY_DELAY_SECONDS", 0)),
             strategy_new_order_cutoff_seconds=_env_int("BOT_STRATEGY_NEW_ORDER_CUTOFF_SECONDS", 30),
             strategy_fill_grace_seconds=_env_float("BOT_STRATEGY_FILL_GRACE_SECONDS", 5.0),
             strategy_stale_order_seconds=_env_float("BOT_STRATEGY_STALE_ORDER_SECONDS", 8.0),
@@ -323,7 +327,12 @@ class BotConfig:
                 "BOT_POLY_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market"
             ).strip(),
             polymarket_fak_confirm_get_order=_env_bool("BOT_POLY_FAK_CONFIRM_ORDER", True),
-            paladin_pair_sum_max=_env_float("BOT_PALADIN_PAIR_SUM_MAX", 1.0),
+            paladin_pair_sum_max=_env_float("BOT_PALADIN_PAIR_SUM_MAX", 0.97),
+            paladin_pair_sum_max_on_forced_hedge=(
+                None
+                if _env_float("BOT_PALADIN_PAIR_SUM_MAX_ON_FORCE", 1.0) <= 0
+                else min(1.0, _env_float("BOT_PALADIN_PAIR_SUM_MAX_ON_FORCE", 1.0))
+            ),
             paladin_target_min_roi=_env_float("BOT_PALADIN_TARGET_MIN_ROI", 0.0),
             paladin_heartbeat_seconds=max(5.0, _env_float("BOT_PALADIN_HEARTBEAT_SEC", 15.0)),
             paladin_stagger_pair=_env_bool("BOT_PALADIN_STAGGER_PAIR", True),
