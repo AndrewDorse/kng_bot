@@ -213,24 +213,32 @@ def paladin_v7_step(
 
         if ok_cheap or ok_forced:
             sh_exec = _clamp_shares(st, side_o, sh_need, p.max_shares_per_side, min_sh)
-            if sh_exec >= min_sh - 1e-9 and sh_exec * px_o >= float(p.min_notional) - 1e-9:
+            if sh_exec >= min_sh - 1e-9:
+                # If mid*shares < CLOB min notional (e.g. $1), still complete the hedge in sim.
+                hedge_mn = float(p.min_notional)
+                if sh_exec * px_o + 1e-9 < hedge_mn:
+                    hedge_mn = 0.0
                 reason = "v7_hedge_forced" if ok_forced and not ok_cheap else "v7_hedge_cheap"
-                if (
-                    buy(
-                        st,
-                        t=t,
-                        side=side_o,
-                        shares=sh_exec,
-                        px=px_o,
-                        reason=reason,
-                        budget=p.budget_usdc,
-                        min_notional=p.min_notional,
-                        min_shares=min_sh,
-                    )
-                    > 0
-                ):
-                    runner.pending_second = None
-                    runner.last_completed_pair_elapsed = int(t)
+                filled = buy(
+                    st,
+                    t=t,
+                    side=side_o,
+                    shares=sh_exec,
+                    px=px_o,
+                    reason=reason,
+                    budget=p.budget_usdc,
+                    min_notional=hedge_mn,
+                    min_shares=min_sh,
+                )
+                if filled > 1e-9:
+                    # Live FAK can partially fill; do not clear pending until hedge need is exhausted
+                    # (clearing early caused extra same-side clips / double hedges on the next ticks).
+                    rem = float(sh_need) - float(filled)
+                    if rem <= 1e-6:
+                        runner.pending_second = None
+                        runner.last_completed_pair_elapsed = int(t)
+                    else:
+                        runner.pending_second = (side_o, rem, avg_first, t0)
         return
 
     balanced = abs(st.size_up - st.size_down) <= 1e-9
@@ -253,7 +261,7 @@ def paladin_v7_step(
             and improves_leg(st.size_up, st.avg_up, pm_u, sh_u)
             and improves_leg(st.size_down, st.avg_down, pm_d, sh_d)
         ):
-            if buy(
+            up_fill = buy(
                 st,
                 t=t,
                 side="up",
@@ -263,7 +271,9 @@ def paladin_v7_step(
                 budget=p.budget_usdc,
                 min_notional=p.min_notional,
                 min_shares=min_sh,
-            ) > 0:
+            )
+            # Only add the paired Down clip if the Up clip fully sized (avoids one-sided refill on partial FAK).
+            if up_fill + 1e-9 >= float(sh_u):
                 sh_d2 = _clamp_shares(st, "down", refill_sh, p.max_shares_per_side, min_sh)
                 if sh_d2 >= min_sh - 1e-9 and improves_leg(st.size_down, st.avg_down, pm_d, sh_d2):
                     buy(
@@ -304,22 +314,22 @@ def paladin_v7_step(
     if sh1 < min_sh - 1e-9:
         return
 
-    if (
-        buy(
-            st,
-            t=t,
-            side=mom,
-            shares=sh1,
-            px=px_1,
-            reason="v7_first_binance_spike",
-            budget=p.budget_usdc,
-            min_notional=p.min_notional,
-            min_shares=min_sh,
-        )
-        > 0
-    ):
+    matched = buy(
+        st,
+        t=t,
+        side=mom,
+        shares=sh1,
+        px=px_1,
+        reason="v7_first_binance_spike",
+        budget=p.budget_usdc,
+        min_notional=p.min_notional,
+        min_shares=min_sh,
+    )
+    # Live FAK can partially fill; hedge must target actual shares and leg VWAP (not requested clip / signal px).
+    if matched > 1e-9:
         other: Side = "down" if mom == "up" else "up"
-        runner.pending_second = (other, sh1, px_1, int(t))
+        leg_avg = float(st.avg_up) if mom == "up" else float(st.avg_down)
+        runner.pending_second = (other, float(matched), leg_avg, int(t))
 
 
 # Tight sim: $10 budget, 10 shares/side cap, 5-share clips, at most 4 fills (two spike pairs or one pair+refill).
@@ -330,7 +340,7 @@ V7_SMALL_BUDGET_4ORDERS = PaladinV7Params(
     max_orders=4,
     min_notional=1.0,
     min_shares=5.0,
-    forced_hedge_max_book_sum=1.04,
+    forced_hedge_max_book_sum=1.5,
     cheap_pair_sum_max=0.995,
 )
 
