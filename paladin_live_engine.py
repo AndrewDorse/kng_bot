@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Live PALADIN pair-only loop: WebSocket mids + FAK buys (POST + optional GET fill confirm).
+Live PALADIN v4 pair-only loop: WebSocket mids + FAK buys (POST + optional GET fill confirm).
 
 Core loop (each poll, default ~1s via BOT_POLL_INTERVAL_SECONDS):
   1) Resolve active 15m contract; refresh WS asset ids on window change.
@@ -435,6 +435,7 @@ class PaladinLiveEngine:
             entry_trailing_low_slippage=float(
                 self.config.paladin_entry_trailing_low_slippage
             ),
+            second_leg_must_improve_leg_avg=False,
         )
         if stopped:
             m = runner.st.snapshot_metrics()

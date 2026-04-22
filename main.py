@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BTC 15-minute bot entry point. Default strategy: PALADIN pair-only live (see paladin_live_engine.py)."""
+"""BTC 15-minute bot entry point. Default strategy: PALADIN v4 pair-only live (see paladin_live_engine.py)."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def main() -> int:
     elif config.strategy_mode == "signal_only":
         LOGGER.info("signal_preset= %s", config.signal_preset)
     elif config.strategy_mode == "paladin":
-        LOGGER.info("strategy_id  = %s", "PALADIN_pair_live_v3")
+        LOGGER.info("strategy_id  = %s", "PALADIN_pair_live_v4")
         LOGGER.info("poly_ws      = %s (%s)", config.polymarket_ws_enabled, config.polymarket_ws_url)
         LOGGER.info("fak_confirm  = %s (GET /order after FAK when needed)", config.polymarket_fak_confirm_get_order)
         LOGGER.info(
@@ -67,12 +67,13 @@ def main() -> int:
             config.paladin_discipline_relax_after_forced_sec,
         )
         LOGGER.info(
-            "paladin_v3    = second_leg_book_eps=%.4f max_blended_avg_sum=%s "
-            "stagger_win_first=%s sym_fallback_balanced=%s",
+            "paladin_v4    = second_leg_book_eps=%.4f max_blended_avg_sum=%s "
+            "stagger_win_first=%s sym_fallback_balanced=%s sym_skip_first_blend_cap=%s",
             config.paladin_second_leg_book_improve_eps,
             config.paladin_max_blended_pair_avg_sum,
             config.paladin_stagger_winning_side_first_when_position,
             config.paladin_stagger_symmetric_fallback_when_balanced,
+            config.paladin_stagger_symmetric_fallback_skip_first_leg_blend_cap,
         )
         tr = config.paladin_entry_trailing_min_low_seconds
         LOGGER.info(

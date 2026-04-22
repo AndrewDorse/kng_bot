@@ -44,7 +44,7 @@ Before switching out of dry-run:
 
 - verify all secrets are set in Hostinger
 - keep `POLY_DRY_RUN=true` for the first deployment
-- check logs for market discovery, WS/REST mids, and `paladin` (PALADIN v3) startup
+- check logs for market discovery, WS/REST mids, and `paladin` (PALADIN v4) startup
 - only then flip `POLY_DRY_RUN=false`
 
 ## Environment Variables
@@ -79,7 +79,7 @@ Recommended:
 
 ## Strategy Note
 
-Docker Compose defaults to **`BOT_STRATEGY_MODE=paladin`** (PALADIN v3 pair ladder): **10 shares per side** per window, causal ladder pacing, optional relayer envs unchanged. Override with `BOT_PALADIN_*` vars (see `.env.example`).
+Docker Compose defaults to **`BOT_STRATEGY_MODE=paladin`** (PALADIN **v4** pair ladder): **10 shares per side** per window, **90s** stagger hedge force, **0.97** max blended pair avg, causal ladder pacing, optional relayer envs unchanged. Override with `BOT_PALADIN_*` vars (see `.env.example`).
 
 For **`champ4_6s`** (dual-side hedge, 6-share clips), set `BOT_STRATEGY_MODE=champ4_6s` and `BOT_SHARES_PER_LEVEL=6`.
 

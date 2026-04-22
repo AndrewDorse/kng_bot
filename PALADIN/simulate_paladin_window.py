@@ -460,6 +460,40 @@ def _violates_blended_avg_sum_cap(
     return nau + nad > float(cap) + 1e-9
 
 
+def _clamp_shares_for_blended_pair_avg_sum(
+    size_up: float,
+    avg_up: float,
+    size_down: float,
+    avg_down: float,
+    *,
+    side: Side,
+    px: float,
+    cap: float | None,
+    sh_hi: float,
+    min_clip: float,
+) -> float:
+    """Largest whole-share clip <= sh_hi (and >= min_clip) with post-fill avg_up+avg_down <= cap."""
+    if cap is None or float(cap) <= 0:
+        return float(sh_hi)
+    if sh_hi < min_clip - 1e-9:
+        return 0.0
+    s_hi = int(math.floor(float(sh_hi) + 1e-9))
+    s_lo = int(math.ceil(float(min_clip) - 1e-9))
+    for s in range(s_hi, s_lo - 1, -1):
+        if not _violates_blended_avg_sum_cap(
+            size_up,
+            avg_up,
+            size_down,
+            avg_down,
+            side=side,
+            sh=float(s),
+            px=px,
+            cap=cap,
+        ):
+            return float(s)
+    return 0.0
+
+
 def _passes_trailing_leg_low(
     hist: list[tuple[float, float]],
     window: int,
@@ -605,11 +639,12 @@ def paladin_step(
     stagger_winning_side_first_when_position: bool = False,
     stagger_symmetric_fallback_when_balanced: bool = True,
     stagger_symmetric_fallback_roi_discount: float = 0.03,
-    stagger_symmetric_fallback_skip_first_leg_blend_cap: bool = True,
+    stagger_symmetric_fallback_skip_first_leg_blend_cap: bool = False,
     stagger_alternate_first_leg_when_balanced: bool = False,
     min_elapsed_between_pair_starts: float | None = None,
     entry_trailing_min_low_seconds: int | None = None,
     entry_trailing_low_slippage: float = 0.02,
+    second_leg_must_improve_leg_avg: bool = False,
 ) -> bool:
     """Advance PALADIN by one simulated second. Returns True if profit-lock stopped trading."""
     st = runner.st
@@ -740,22 +775,28 @@ def paladin_step(
         sh_exec = _clamp_one_leg_for_cap(
             sh_w, st, side=side_w, max_shares_per_side=max_shares_per_side, min_clip=min_clip
         )
+        sh_exec = _clamp_shares_for_blended_pair_avg_sum(
+            st.size_up,
+            st.avg_up,
+            st.size_down,
+            st.avg_down,
+            side=side_w,
+            px=px,
+            cap=max_blended_pair_avg_sum,
+            sh_hi=sh_exec,
+            min_clip=min_clip,
+        )
         if sh_exec < min_clip - 1e-9:
             return False
         if (
-            not use_relaxed_pending
-            and _violates_blended_avg_sum_cap(
-                st.size_up,
-                st.avg_up,
-                st.size_down,
-                st.avg_down,
-                side=side_w,
-                sh=sh_exec,
-                px=px,
-                cap=max_blended_pair_avg_sum,
-            )
+            second_leg_must_improve_leg_avg
+            and not use_relaxed_pending
+            and not force_hedge
         ):
-            return False
+            sz_i = st.size_up if side_w == "up" else st.size_down
+            av_i = st.avg_up if side_w == "up" else st.avg_down
+            if sz_i > 1e-9 and not improves_leg(sz_i, av_i, px, sh_exec):
+                return False
         filled_w = buy(
             st,
             t=t,
@@ -1157,11 +1198,12 @@ def run_window(
     stagger_winning_side_first_when_position: bool = False,
     stagger_symmetric_fallback_when_balanced: bool = True,
     stagger_symmetric_fallback_roi_discount: float = 0.03,
-    stagger_symmetric_fallback_skip_first_leg_blend_cap: bool = True,
+    stagger_symmetric_fallback_skip_first_leg_blend_cap: bool = False,
     stagger_alternate_first_leg_when_balanced: bool = False,
     min_elapsed_between_pair_starts: float | None = None,
     entry_trailing_min_low_seconds: int | None = None,
     entry_trailing_low_slippage: float = 0.02,
+    second_leg_must_improve_leg_avg: bool = False,
 ) -> SimState:
     runner = PaladinPairRunner()
     for t, (pm_u, pm_d) in enumerate(prices):
@@ -1201,6 +1243,7 @@ def run_window(
             min_elapsed_between_pair_starts=min_elapsed_between_pair_starts,
             entry_trailing_min_low_seconds=entry_trailing_min_low_seconds,
             entry_trailing_low_slippage=entry_trailing_low_slippage,
+            second_leg_must_improve_leg_avg=second_leg_must_improve_leg_avg,
         ):
             break
     return runner.st
