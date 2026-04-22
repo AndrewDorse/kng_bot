@@ -22,9 +22,11 @@ COPY trader.py /app/trader.py
 COPY signal_analyzer.py /app/signal_analyzer.py
 COPY http_session.py /app/http_session.py
 COPY paladin_live_engine.py /app/paladin_live_engine.py
+COPY paladin_v7_live_engine.py /app/paladin_v7_live_engine.py
 COPY polymarket_ws.py /app/polymarket_ws.py
 RUN mkdir -p /app/PALADIN
 COPY PALADIN/paladin_engine.py /app/PALADIN/paladin_engine.py
+COPY PALADIN/paladin_v7.py /app/PALADIN/paladin_v7.py
 COPY PALADIN/simulate_paladin_window.py /app/PALADIN/simulate_paladin_window.py
 COPY PALADIN/paladin_sim_config.json /app/PALADIN/paladin_sim_config.json
 

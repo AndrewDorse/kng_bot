@@ -1,0 +1,14 @@
+# KNG3 deploy mirror — canonical references (do not guess URLs; edit here if the mirror moves).
+#
+# From session / prior deploy work:
+#   - Local working copy:  C:\Users\Lenovo\Documents\Git\KNG3
+#   - GitHub remote (this repo):  https://github.com/AndrewDorse/KNG3.git
+#
+# Register on kng_bot3 (one-time):
+#   git remote add kng3 https://github.com/AndrewDorse/KNG3.git
+#
+# Sync files from kng_bot3 → local KNG3, then commit inside KNG3:
+#   powershell -File deploy\sync_kng3_mirror.ps1
+#
+MIRROR_LOCAL_PATH=C:\Users\Lenovo\Documents\Git\KNG3
+MIRROR_GIT_URL=https://github.com/AndrewDorse/KNG3.git
