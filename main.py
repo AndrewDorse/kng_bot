@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BTC 15-minute continuous redeem-hold bot entry point."""
+"""BTC 15-minute bot entry point. Default strategy: PALADIN pair-only live (see paladin_live_engine.py)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 from btc15_redeem_engine import Btc15RedeemEngine
 from config import BotConfig, BotConfigError, LOGGER, configure_logging
 from market_locator import GammaMarketLocator
+from paladin_live_engine import PaladinLiveEngine
 from signal_analyzer import SignalAnalyzer
 from trader import PolymarketTrader
 
@@ -35,11 +36,53 @@ def main() -> int:
             "BTC_VOLUME_T10_hybrid_v2" if config.strategy_mode == "volume_t10_hybrid" else "BTC_VOLUME_T10_dual_v1",
         )
     elif config.strategy_mode == "volume_scalp_up":
-        LOGGER.info("strategy_id  = %s", "BTC_VOLUME_SCALP_UP_v1")
+        LOGGER.info("strategy_id  = %s", "BTC_VOLUME_SCALP_UP_v2")
     elif config.strategy_mode == "btc_perp15":
-        LOGGER.info("strategy_id  = %s", "BTC_PERP15_v1")
+        LOGGER.info("strategy_id  = %s", "BTC_PERP15_UP_LADDER_v3")
     elif config.strategy_mode == "signal_only":
         LOGGER.info("signal_preset= %s", config.signal_preset)
+    elif config.strategy_mode == "paladin":
+        LOGGER.info("strategy_id  = %s", "PALADIN_pair_live_v3")
+        LOGGER.info("poly_ws      = %s (%s)", config.polymarket_ws_enabled, config.polymarket_ws_url)
+        LOGGER.info("fak_confirm  = %s (GET /order after FAK when needed)", config.polymarket_fak_confirm_get_order)
+        LOGGER.info(
+            "paladin_pair = sum<=%.3f | min_marginal_roi=%.3f (2nd leg; 1st leg mid<=%.3f)",
+            config.paladin_pair_sum_max,
+            config.paladin_target_min_roi,
+            config.paladin_first_leg_max_px,
+        )
+        LOGGER.info(
+            "paladin_entry= stagger=%s hedge_force_s=%s max_sh/side=%s clip_cap=%.0f cooldown=%.2fs",
+            config.paladin_stagger_pair,
+            config.paladin_stagger_hedge_force_after_seconds,
+            config.paladin_max_shares_per_side,
+            config.paladin_dynamic_clip_cap,
+            config.paladin_cooldown_seconds,
+        )
+        LOGGER.info(
+            "paladin_disc  = tighten_pf=%.4f sum_floor=%.2f imb_bypass_sh=%s relax_after_force_s=%s",
+            config.paladin_pair_sum_tighten_per_fill,
+            config.paladin_pair_sum_min_floor,
+            config.paladin_pending_hedge_bypass_imbalance_shares,
+            config.paladin_discipline_relax_after_forced_sec,
+        )
+        LOGGER.info(
+            "paladin_v3    = second_leg_book_eps=%.4f max_blended_avg_sum=%s "
+            "stagger_win_first=%s sym_fallback_balanced=%s",
+            config.paladin_second_leg_book_improve_eps,
+            config.paladin_max_blended_pair_avg_sum,
+            config.paladin_stagger_winning_side_first_when_position,
+            config.paladin_stagger_symmetric_fallback_when_balanced,
+        )
+        tr = config.paladin_entry_trailing_min_low_seconds
+        LOGGER.info(
+            "paladin_ladder= min_gap_between_pairs=%s trail_low_sec=%s entry_slip=%.3f "
+            "alternate_first_when_balanced=%s",
+            config.paladin_min_elapsed_between_pair_starts,
+            tr if tr is not None else "off",
+            float(config.paladin_entry_trailing_low_slippage),
+            config.paladin_stagger_alternate_first_leg_when_balanced,
+        )
     LOGGER.info("market       = %s", config.market_slug_prefix)
     LOGGER.info("shares/order = %d", config.shares_per_level)
     LOGGER.info("budget cap   = $%.2f", config.strategy_budget_cap_usdc)
@@ -53,6 +96,15 @@ def main() -> int:
 
     locator = GammaMarketLocator(config)
     trader = PolymarketTrader(config)
+
+    if config.strategy_mode == "paladin":
+        if config.dry_run:
+            LOGGER.warning("PALADIN: POLY_DRY_RUN=true — paper only (no CLOB orders).")
+        else:
+            LOGGER.warning("PALADIN: LIVE — FAK buys will execute on Polymarket. Ctrl+C stops the loop.")
+        PaladinLiveEngine(config, locator, trader).run()
+        return 0
+
     engine = Btc15RedeemEngine(config, locator, trader)
 
     signals: SignalAnalyzer | None = None

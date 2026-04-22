@@ -7,6 +7,7 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,9 +31,36 @@ class BotConfigError(RuntimeError):
     pass
 
 
+def _strip_env_copy_artifacts(value: str) -> str:
+    """Remove stray prefixes from pasted env values (e.g. `.git0x...` from a broken .env line)."""
+    s = value.strip().strip('"').strip("'")
+    if s.startswith(".git") and s[4:].strip().lower().startswith("0x"):
+        LOGGER.warning(
+            "Stripped stray '.git' prefix from an address/env value — fix your .env (duplicate key or bad paste)."
+        )
+        s = s[4:].strip()
+    return s
+
+
+def _normalize_polymarket_funder(raw: str) -> str:
+    """POLY_FUNDER must be a checksummable 0x + 40 hex EVM address."""
+    s = _strip_env_copy_artifacts(raw)
+    if not s.startswith("0x"):
+        raise BotConfigError(
+            "POLY_FUNDER must be an Ethereum address starting with 0x. "
+            f"Check for typos or a stray prefix. Raw length={len(raw.strip())!r}."
+        )
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", s):
+        raise BotConfigError(
+            "POLY_FUNDER must be exactly 0x plus 40 hexadecimal characters "
+            f"(42 chars total). After cleanup, got length {len(s)}. First chars: {s[:12]}…"
+        )
+    return s
+
+
 def _normalize_strategy_mode(raw: str | None) -> str:
     """Canonicalize strategy_mode so strategy aliases always match engine guards."""
-    s = (raw or "champ4_6s").strip().lower()
+    s = (raw or "iy2").strip().lower()
     for ch in ("\r", "\n", "\t"):
         s = s.replace(ch, "")
     s = s.replace("-", "_")
@@ -43,6 +71,12 @@ def _normalize_strategy_mode(raw: str | None) -> str:
         return "volume_scalp_up"
     if s in ("champ4_6s", "champ4", "champ4_live", "wallet_dual", "wallet_dual_live"):
         return "champ4_6s"
+    if s in ("paladin", "paladin_live", "paladin_pair"):
+        return "paladin"
+    if s in ("iy2", "iy_2", "wallet_overlap", "wallet_overlap_live", "iy2_live"):
+        return "iy2"
+    if s in ("iy3", "iy_3", "wallet_overlap_path", "wallet_overlap_path_live", "iy3_live"):
+        return "iy3"
     if "t10" in s:
         return s
     if "scalp" in s and "volume" in s:
@@ -68,7 +102,7 @@ class BotConfig:
     force_exit_before_end_seconds: int = 15
     # Ladder config
     ladder_prices: list = field(default_factory=lambda: [0.44, 0.34, 0.24, 0.14])
-    shares_per_level: int = 6
+    shares_per_level: int = 5
     order_cooldown_seconds: float = 3.0
     hedge_offset: float = 0.02
     market_symbol: str = "BTC"
@@ -81,7 +115,7 @@ class BotConfig:
     strategy_entry_delay_seconds: int = 24
     strategy_new_order_cutoff_seconds: int = 30
     strategy_fill_grace_seconds: float = 5.0
-    strategy_stale_order_seconds: float = 20.0
+    strategy_stale_order_seconds: float = 8.0
     strategy_max_live_orders: int = 4
     strategy_heartbeat_interval_seconds: int = 15
     strategy_price_record_interval_seconds: float = 1.0
@@ -101,8 +135,8 @@ class BotConfig:
     btc_feed_poll_seconds: float = 1.0
     btc_feed_symbol: str = "BTCUSDT"
     signal_preset: str = "w1"
-    # champ4_6s | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
-    strategy_mode: str = "champ4_6s"
+    # paladin | champ4_6s | iy2 | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
+    strategy_mode: str = "paladin"
     # volume scalp: fixed-lot directional entries with one shared TP per held side plus stop/time-exit risk control.
     volume_scalp_tp_offset: float = 0.12
     volume_scalp_stop_offset: float = 0.05
@@ -123,6 +157,47 @@ class BotConfig:
     btc_perp15_sample_interval_seconds: float = 5.0
     # When T-remaining <= this, flatten any positive window position with a marketable sell (btc_perp15 only).
     btc_perp15_end_dump_seconds_remaining: float = 15.0
+    # CLOB market WebSocket (PALADIN / low-latency quotes) + FAK fill confirmation
+    polymarket_ws_enabled: bool = True
+    polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    polymarket_fak_confirm_get_order: bool = True
+    # PALADIN live (pair-only): marginal ROI gate on each symmetric add is often stricter than pair_sum_max.
+    # Empty-book approx: need (pm_u+pm_d) <= 1/(1+target_min_roi). At 3% => sum<=0.971; at 2% => sum<=0.980.
+    paladin_pair_sum_max: float = 1.0
+    # Calibrated ladder (PALADIN/calibrate_ladder_wallet_windows.py): target_min_roi=0 matches 100-window sim.
+    paladin_target_min_roi: float = 0.0
+    paladin_heartbeat_seconds: float = 15.0
+    # Staggered pair: first FAK on cheaper side if mid <= this; complete pair when sum+ROI allow.
+    paladin_stagger_pair: bool = True
+    paladin_first_leg_max_px: float = 0.55
+    # Sim/live: if stagger 2nd leg waits longer than this (seconds after hedge-ready), buy at mid anyway.
+    paladin_stagger_hedge_force_after_seconds: float | None = 45.0
+    # Cap inventory per outcome side (None / <=0 = no cap). PALADIN v3 live default: 10/side (calibrated grid).
+    paladin_max_shares_per_side: float | None = 10.0
+    # Live default 0 (no artificial delay). Use ~2 in replay/batch to mimic one fill per sim second.
+    paladin_cooldown_seconds: float = 0.0
+    # Per-leg clip cap when min leg >= 20 (pair_clip_candidates_dynamic upper bound).
+    paladin_dynamic_clip_cap: float = 12.0
+    # 0.0 matches ladder calibration; >0 tightens effective pair_sum after each fill.
+    paladin_pair_sum_tighten_per_fill: float = 0.0
+    paladin_pair_sum_min_floor: float = 0.90
+    paladin_pending_hedge_bypass_imbalance_shares: float | None = 10.0
+    paladin_discipline_relax_after_forced_sec: float | None = 60.0
+    # PALADIN v3 (strategy_cycle baseline_v3): stricter second-leg vs book; cap avg_up+avg_down after one-leg adds.
+    paladin_second_leg_book_improve_eps: float = 0.013
+    paladin_max_blended_pair_avg_sum: float | None = 1.03
+    # If True, new stagger first leg (when already holding UP or DOWN) only on higher-mid side.
+    paladin_stagger_winning_side_first_when_position: bool = False
+    # When win-side stagger blocks and inventory is balanced, add symmetric pair if ROI/sum gates pass.
+    paladin_stagger_symmetric_fallback_when_balanced: bool = True
+    paladin_stagger_symmetric_fallback_roi_discount: float = 0.03
+    paladin_stagger_symmetric_fallback_skip_first_leg_blend_cap: bool = True
+    # Causal ladder: alternate UP/DN first leg when balanced; pace pair starts; optional trailing dip filter.
+    # PALADIN v3 (100 recent windows, max 10/side): gap=100s, no trailing, slip=0.02 (see exports/*max10*.csv).
+    paladin_stagger_alternate_first_leg_when_balanced: bool = True
+    paladin_min_elapsed_between_pair_starts: float | None = 100.0
+    paladin_entry_trailing_min_low_seconds: int | None = None
+    paladin_entry_trailing_low_slippage: float = 0.02
 
     @property
     def window_size_seconds(self) -> int:
@@ -152,12 +227,13 @@ class BotConfig:
 
     @classmethod
     def from_env(cls) -> "BotConfig":
-        private_key = os.getenv("POLY_PRIVATE_KEY")
-        funder = os.getenv("POLY_FUNDER")
+        private_key = _strip_env_copy_artifacts(os.getenv("POLY_PRIVATE_KEY") or "")
+        funder_raw = os.getenv("POLY_FUNDER") or ""
         if not private_key:
             raise BotConfigError("POLY_PRIVATE_KEY is required.")
-        if not funder:
+        if not funder_raw.strip():
             raise BotConfigError("POLY_FUNDER is required.")
+        funder = _normalize_polymarket_funder(funder_raw)
 
         raw_prices = os.getenv("BOT_LADDER_PRICES", "")
         if raw_prices.strip():
@@ -175,9 +251,9 @@ class BotConfig:
             perp15_ladder = [0.44, 0.43, 0.40]
 
         return cls(
-            private_key=private_key,
+            private_key=private_key.strip(),
             funder=funder,
-            bot_version=os.getenv("BOT_VERSION", "2026-04-15 19:10:00").strip(),
+            bot_version=os.getenv("BOT_VERSION", "paladin-v3-10sh-2026-04-21").strip(),
             signature_type=_env_int("POLY_SIGNATURE_TYPE", 1),
             relayer_api_key=os.getenv("RELAYER_API_KEY", ""),
             relayer_secret=os.getenv("RELAYER_SECRET", ""),
@@ -187,7 +263,7 @@ class BotConfig:
             request_timeout_seconds=_env_float("BOT_REQUEST_TIMEOUT_SECONDS", 10.0),
             log_level=os.getenv("BOT_LOG_LEVEL", "INFO").upper(),
             force_exit_before_end_seconds=_env_int("BOT_FORCE_EXIT_BEFORE_END_SECONDS", 15),
-            shares_per_level=max(1, _env_int("BOT_SHARES_PER_LEVEL", 6)),
+            shares_per_level=max(1, _env_int("BOT_SHARES_PER_LEVEL", 5)),
             ladder_prices=ladder_prices,
             order_cooldown_seconds=_env_float("BOT_ORDER_COOLDOWN_SECONDS", 3.0),
             hedge_offset=_env_float("BOT_HEDGE_OFFSET", 0.02),
@@ -201,7 +277,7 @@ class BotConfig:
             strategy_entry_delay_seconds=_env_int("BOT_STRATEGY_ENTRY_DELAY_SECONDS", 24),
             strategy_new_order_cutoff_seconds=_env_int("BOT_STRATEGY_NEW_ORDER_CUTOFF_SECONDS", 30),
             strategy_fill_grace_seconds=_env_float("BOT_STRATEGY_FILL_GRACE_SECONDS", 5.0),
-            strategy_stale_order_seconds=_env_float("BOT_STRATEGY_STALE_ORDER_SECONDS", 20.0),
+            strategy_stale_order_seconds=_env_float("BOT_STRATEGY_STALE_ORDER_SECONDS", 8.0),
             strategy_max_live_orders=_env_int("BOT_STRATEGY_MAX_LIVE_ORDERS", 4),
             strategy_heartbeat_interval_seconds=_env_int("BOT_STRATEGY_HEARTBEAT_INTERVAL_SECONDS", 15),
             strategy_price_record_interval_seconds=_env_float("BOT_STRATEGY_PRICE_RECORD_INTERVAL_SECONDS", 1.0),
@@ -221,7 +297,7 @@ class BotConfig:
             btc_feed_poll_seconds=_env_float("BOT_BTC_FEED_POLL_SECONDS", 1.0),
             btc_feed_symbol=os.getenv("BOT_BTC_FEED_SYMBOL", "BTCUSDT").upper(),
             signal_preset=os.getenv("BOT_SIGNAL_PRESET", "w1").strip().lower(),
-            strategy_mode=_normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "champ4_6s")),
+            strategy_mode=_normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "paladin")),
             volume_scalp_tp_offset=volume_scalp_tp_raw,
             volume_scalp_stop_offset=_env_float("BOT_VOLUME_SCALP_STOP_OFFSET", 0.05),
             volume_scalp_shares=max(1, _env_int("BOT_VOLUME_SCALP_SHARES", 6)),
@@ -239,6 +315,80 @@ class BotConfig:
             btc_perp15_tp_price=_env_float("BOT_PERP15_TP_PRICE", 0.99),
             btc_perp15_sample_interval_seconds=_env_float("BOT_PERP15_SAMPLE_INTERVAL_SECONDS", 5.0),
             btc_perp15_end_dump_seconds_remaining=max(1.0, _env_float("BOT_PERP15_END_DUMP_SECONDS_REMAINING", 15.0)),
+            polymarket_ws_enabled=_env_bool("BOT_POLY_WS_ENABLED", True),
+            polymarket_ws_url=os.getenv(
+                "BOT_POLY_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+            ).strip(),
+            polymarket_fak_confirm_get_order=_env_bool("BOT_POLY_FAK_CONFIRM_ORDER", True),
+            paladin_pair_sum_max=_env_float("BOT_PALADIN_PAIR_SUM_MAX", 1.0),
+            paladin_target_min_roi=_env_float("BOT_PALADIN_TARGET_MIN_ROI", 0.0),
+            paladin_heartbeat_seconds=max(5.0, _env_float("BOT_PALADIN_HEARTBEAT_SEC", 15.0)),
+            paladin_stagger_pair=_env_bool("BOT_PALADIN_STAGGER_PAIR", True),
+            paladin_first_leg_max_px=_env_float("BOT_PALADIN_FIRST_LEG_MAX_PX", 0.55),
+            paladin_stagger_hedge_force_after_seconds=(
+                None
+                if _env_float("BOT_PALADIN_STAGGER_HEDGE_FORCE_SEC", 45.0) <= 0
+                else _env_float("BOT_PALADIN_STAGGER_HEDGE_FORCE_SEC", 45.0)
+            ),
+            paladin_max_shares_per_side=(
+                None
+                if _env_float("BOT_PALADIN_MAX_SHARES_PER_SIDE", 10.0) <= 0
+                else _env_float("BOT_PALADIN_MAX_SHARES_PER_SIDE", 10.0)
+            ),
+            paladin_cooldown_seconds=max(0.0, _env_float("BOT_PALADIN_COOLDOWN_SEC", 0.0)),
+            paladin_dynamic_clip_cap=max(5.0, _env_float("BOT_PALADIN_DYNAMIC_CLIP_CAP", 12.0)),
+            paladin_pair_sum_tighten_per_fill=max(
+                0.0, _env_float("BOT_PALADIN_PAIR_SUM_TIGHTEN_PER_FILL", 0.0)
+            ),
+            paladin_pair_sum_min_floor=max(
+                0.80, min(0.999, _env_float("BOT_PALADIN_PAIR_SUM_MIN_FLOOR", 0.90))
+            ),
+            paladin_pending_hedge_bypass_imbalance_shares=(
+                None
+                if _env_float("BOT_PALADIN_PENDING_HEDGE_BYPASS_IMBALANCE_SH", 10.0) <= 0
+                else _env_float("BOT_PALADIN_PENDING_HEDGE_BYPASS_IMBALANCE_SH", 10.0)
+            ),
+            paladin_discipline_relax_after_forced_sec=(
+                None
+                if _env_float("BOT_PALADIN_DISCIPLINE_RELAX_AFTER_FORCE_SEC", 60.0) <= 0
+                else _env_float("BOT_PALADIN_DISCIPLINE_RELAX_AFTER_FORCE_SEC", 60.0)
+            ),
+            paladin_second_leg_book_improve_eps=max(
+                0.0, _env_float("BOT_PALADIN_SECOND_LEG_BOOK_IMPROVE_EPS", 0.013)
+            ),
+            paladin_max_blended_pair_avg_sum=(
+                None
+                if _env_float("BOT_PALADIN_MAX_BLENDED_PAIR_AVG_SUM", 1.03) <= 0
+                else _env_float("BOT_PALADIN_MAX_BLENDED_PAIR_AVG_SUM", 1.03)
+            ),
+            paladin_stagger_winning_side_first_when_position=_env_bool(
+                "BOT_PALADIN_STAGGER_WINNING_SIDE_FIRST_WHEN_POSITION", False
+            ),
+            paladin_stagger_symmetric_fallback_when_balanced=_env_bool(
+                "BOT_PALADIN_STAGGER_SYMMETRIC_FALLBACK_WHEN_BALANCED", True
+            ),
+            paladin_stagger_symmetric_fallback_roi_discount=_env_float(
+                "BOT_PALADIN_STAGGER_SYMMETRIC_FALLBACK_ROI_DISCOUNT", 0.03
+            ),
+            paladin_stagger_symmetric_fallback_skip_first_leg_blend_cap=_env_bool(
+                "BOT_PALADIN_STAGGER_SYMMETRIC_FALLBACK_SKIP_FIRST_BLEND", True
+            ),
+            paladin_stagger_alternate_first_leg_when_balanced=_env_bool(
+                "BOT_PALADIN_STAGGER_ALTERNATE_FIRST_WHEN_BALANCED", True
+            ),
+            paladin_min_elapsed_between_pair_starts=(
+                None
+                if _env_float("BOT_PALADIN_MIN_ELAPSED_BETWEEN_PAIR_STARTS", 100.0) < 0
+                else _env_float("BOT_PALADIN_MIN_ELAPSED_BETWEEN_PAIR_STARTS", 100.0)
+            ),
+            paladin_entry_trailing_min_low_seconds=(
+                None
+                if _env_int("BOT_PALADIN_ENTRY_TRAILING_MIN_LOW_SEC", -1) < 0
+                else _env_int("BOT_PALADIN_ENTRY_TRAILING_MIN_LOW_SEC", -1)
+            ),
+            paladin_entry_trailing_low_slippage=_env_float(
+                "BOT_PALADIN_ENTRY_TRAILING_LOW_SLIPPAGE", 0.02
+            ),
         )
 
 

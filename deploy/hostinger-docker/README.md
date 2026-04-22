@@ -26,6 +26,8 @@ The image copies only the files required for the live bot:
 - `trader.py`
 - `signal_analyzer.py`
 - `http_session.py`
+- `paladin_live_engine.py`, `polymarket_ws.py`
+- `PALADIN/paladin_engine.py`, `PALADIN/simulate_paladin_window.py`, `PALADIN/paladin_sim_config.json`
 
 It does not copy local logs, exports, virtualenv files, backups, or analysis scripts into the image.
 
@@ -42,7 +44,7 @@ Before switching out of dry-run:
 
 - verify all secrets are set in Hostinger
 - keep `POLY_DRY_RUN=true` for the first deployment
-- check logs for market discovery, BTC polling, and `champ4_6s` strategy startup
+- check logs for market discovery, WS/REST mids, and `paladin` (PALADIN v3) startup
 - only then flip `POLY_DRY_RUN=false`
 
 ## Environment Variables
@@ -77,16 +79,11 @@ Recommended:
 
 ## Strategy Note
 
-The deployment example now defaults to `BOT_STRATEGY_MODE=champ4_6s` with `BOT_SHARES_PER_LEVEL=6`.
+Docker Compose defaults to **`BOT_STRATEGY_MODE=paladin`** (PALADIN v3 pair ladder): **10 shares per side** per window, causal ladder pacing, optional relayer envs unchanged. Override with `BOT_PALADIN_*` vars (see `.env.example`).
 
-`champ4_6s` is a hold-to-redeem dual-side hedge profile:
+For **`champ4_6s`** (dual-side hedge, 6-share clips), set `BOT_STRATEGY_MODE=champ4_6s` and `BOT_SHARES_PER_LEVEL=6`.
 
-- opens both sides in every window
-- builds using 6-share clips
-- follows BTC direction for the main side
-- keeps the opposite side as a live hedge
-
-If you want the older perpetual-style runner instead, set `BOT_STRATEGY_MODE=btc_perp15` manually.
+If you want the perpetual-style runner instead, set `BOT_STRATEGY_MODE=btc_perp15` manually.
 
 For **`volume_scalp_up`**, TP is **not** fixed at 0.99: it is entry anchor + `BOT_VOLUME_SCALP_TP_OFFSET` (capped at 0.99). If you set `BOT_VOLUME_SCALP_TP_OFFSET=10`, that means **+10¢** (normalized from cents).
 

@@ -1,0 +1,5 @@
+{
+  "roi_lock_min_each": 0.99,
+  "profit_lock_usdc_each_scenario": 0,
+  "profit_lock_min_shares_per_side": 100.0
+}
