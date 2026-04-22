@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import statistics
@@ -13,21 +14,26 @@ OUTDIR = Path("exports/champ4_share_public_pools")
 COMPLETE_MIN_ELAPSED = 840
 POOL_SIZES = (100, 200, 300, 800)
 CLIP_SHARES = 6
+# Matches btc15_redeem_engine.py _champ4_evaluate_tick + CHAMP4_*_DELAY / CHAMP4_LATE_SPREAD_MIN
+CHAMP4_ENTRY_SEC = 24
+CHAMP4_MID1_SEC = 90
+CHAMP4_MID2_SEC = 540
+CHAMP4_LATE_SEC = 600
+CHAMP4_LATE_SPREAD_MIN = 0.12
 
 RULES = {
     "name": "CHAMP4_6S",
     "description": (
-        "Share-normalized CHAMP4. Uses only 6-share clips so results are comparable to other "
-        "share-based wallet mimics instead of fixed-dollar sizing."
+        "Live champ4_6s replay: 6-share clips, BTC direction = (last_btc - open) / open using "
+        "the snapshot row at each stage; stages at 24s / 90s / 540s / 600s."
     ),
     "base_clip_shares": CLIP_SHARES,
     "rules": [
-        "At 30s, compute BTC direction from open. Buy 4 clips (24 shares) on BTC direction and 3 clips (18 shares) on the opposite side.",
-        "At 240s, recompute BTC direction from open.",
-        "If BTC direction agrees with the current PM leader, buy 3 clips (18 shares) on BTC direction and 1 clip (6 shares) on the opposite side.",
-        "If BTC direction disagrees with the current PM leader, buy 2 clips (12 shares) on BTC direction and 2 clips (12 shares) on the opposite side.",
-        "At 600s, if BTC direction still agrees with the current PM leader and spread >= 0.08, buy 1 clip (6 shares) on the leader.",
-        "Every order is exactly 6 shares. Hold to expiry; no sells.",
+        "At >=24s: enqueue 4 clips on BTC-dir side and 2 on opposite (interleaved in live; same row prices here).",
+        "At >=90s: 1 BTC-dir clip + 2 opposite clips.",
+        "At >=540s: if BTC-dir agrees with PM leader, 1 opposite clip; else 1 BTC-dir + 3 opposite clips.",
+        "At >=600s: if BTC-dir agrees with leader and |up-down| >= 0.12, 1 clip on leader.",
+        "Hold to settlement; no sells.",
     ],
 }
 
@@ -123,7 +129,12 @@ def nearest_row(rows: list[SnapshotRow], elapsed_sec: int) -> SnapshotRow:
 
 
 def btc_dir(open_row: SnapshotRow, row: SnapshotRow) -> str:
-    return "UP" if row.btc_price >= open_row.btc_price else "DOWN"
+    """Aligned with _volume_t10_btc_return: sign of (btc - open) maps to UP/DOWN."""
+    o = open_row.btc_price
+    if o <= 0:
+        return "UP"
+    ret = (row.btc_price - o) / o
+    return "UP" if ret >= 0 else "DOWN"
 
 
 def buy(fills: list[Fill], row: SnapshotRow, side: str, clips: int, reason: str) -> None:
@@ -147,28 +158,41 @@ def buy(fills: list[Fill], row: SnapshotRow, side: str, clips: int, reason: str)
 
 def simulate_window(rows: list[SnapshotRow]) -> list[Fill]:
     open_row = nearest_row(rows, 0)
-    row30 = nearest_row(rows, 30)
-    row240 = nearest_row(rows, 240)
-    row600 = nearest_row(rows, 600)
+    row24 = nearest_row(rows, CHAMP4_ENTRY_SEC)
+    row90 = nearest_row(rows, CHAMP4_MID1_SEC)
+    row540 = nearest_row(rows, CHAMP4_MID2_SEC)
+    row600 = nearest_row(rows, CHAMP4_LATE_SEC)
 
     fills: list[Fill] = []
 
-    side30 = btc_dir(open_row, row30)
-    hedge30 = "DOWN" if side30 == "UP" else "UP"
-    buy(fills, row30, side30, 4, "entry_btc_dir")
-    buy(fills, row30, hedge30, 3, "entry_hedge")
+    # entry: 4 main + 2 hedge on BTC direction at first entry tick (live: >=24s)
+    btc_side = btc_dir(open_row, row24)
+    hedge_side = "DOWN" if btc_side == "UP" else "UP"
+    buy(fills, row24, btc_side, 4, "champ4|entry|main")
+    buy(fills, row24, hedge_side, 2, "champ4|entry|hedge")
 
-    side240 = btc_dir(open_row, row240)
-    hedge240 = "DOWN" if side240 == "UP" else "UP"
-    if side240 == row240.leader:
-        buy(fills, row240, side240, 3, "mid_agree_press")
-        buy(fills, row240, hedge240, 1, "mid_agree_hedge")
+    # mid1: 1 + 2
+    btc_side = btc_dir(open_row, row90)
+    hedge_side = "DOWN" if btc_side == "UP" else "UP"
+    buy(fills, row90, btc_side, 1, "champ4|mid1|main")
+    buy(fills, row90, hedge_side, 2, "champ4|mid1|hedge")
+
+    # mid2
+    btc_side = btc_dir(open_row, row540)
+    leader = row540.leader
+    hedge_side = "DOWN" if btc_side == "UP" else "UP"
+    if btc_side == leader:
+        buy(fills, row540, hedge_side, 1, "champ4|mid2|agree_hedge")
     else:
-        buy(fills, row240, side240, 2, "mid_disagree_main")
-        buy(fills, row240, hedge240, 2, "mid_disagree_hedge")
+        buy(fills, row540, btc_side, 1, "champ4|mid2|disagree|main")
+        buy(fills, row540, hedge_side, 3, "champ4|mid2|disagree|hedge")
 
-    if btc_dir(open_row, row600) == row600.leader and abs(row600.up_price - row600.down_price) >= 0.08:
-        buy(fills, row600, row600.leader, 1, "late_confirm_press")
+    # late: leader clip if agree + spread
+    btc_side = btc_dir(open_row, row600)
+    leader = row600.leader
+    spread = abs(row600.up_price - row600.down_price)
+    if btc_side == leader and spread >= CHAMP4_LATE_SPREAD_MIN:
+        buy(fills, row600, leader, 1, "champ4|late_confirm")
 
     fills.sort(key=lambda item: (item.elapsed_sec, item.reason))
     return fills
@@ -223,13 +247,29 @@ def summarize_pool(pool_name: str, rows: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Replay champ4_6s (6-share clips) on public window snapshots.")
+    parser.add_argument(
+        "--pool-sizes",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="N",
+        help="Pool sizes to run (tail of loaded windows). Default: 100,200,300,800 plus full set.",
+    )
+    args = parser.parse_args()
+
     OUTDIR.mkdir(parents=True, exist_ok=True)
     windows = load_windows()
+    nwin = len(windows)
+    if args.pool_sizes:
+        pool_sizes = sorted({min(s, nwin) for s in args.pool_sizes if s > 0})
+    else:
+        pool_sizes = sorted({min(s, nwin) for s in [*POOL_SIZES, nwin]}) if windows else []
 
     all_fill_rows: list[dict[str, Any]] = []
     pool_summaries: list[dict[str, Any]] = []
 
-    for pool_size in POOL_SIZES:
+    for pool_size in pool_sizes:
         subset = windows[-pool_size:]
         window_rows: list[dict[str, Any]] = []
         fill_rows: list[dict[str, Any]] = []

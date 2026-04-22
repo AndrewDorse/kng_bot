@@ -24,7 +24,6 @@ class DominanceStrategy:
         if not live_positions:
             return False
 
-        # Cancel outstanding buy orders for this contract before panic selling.
         for order in open_orders:
             side = str(order.get("side") or "").upper()
             order_id = str(order.get("id") or order.get("orderID") or "")
@@ -67,8 +66,6 @@ class DominanceStrategy:
         if self.window_slug != contract.slug:
             self.reset_for_window(contract)
 
-        # Risk protection stays active every tick: if a live dominance-window position drops below 0.77,
-        # market-sell it immediately and let the rest of the bot continue normally.
         self._handle_safe_sell(engine, contract, positions, open_orders)
 
         if self.entered:
@@ -78,7 +75,6 @@ class DominanceStrategy:
         if elapsed_second > 299:
             return
 
-        # do not stack another dominance entry if there is already a significant live position in this window
         if any(p.shares >= 1.0 for p in positions):
             LOGGER.info("[DOMINANCE SKIP] %s | live position already exists", contract.slug)
             self.entered = True
@@ -98,7 +94,7 @@ class DominanceStrategy:
             return
 
         try:
-            _, balance = engine.trader.get_all_balances()
+            balance = engine.trader.get_all_balances()
         except Exception as exc:
             LOGGER.warning("[DOMINANCE BALANCE] %s | failed to get balance: %s", contract.slug, exc)
             balance = 0.0

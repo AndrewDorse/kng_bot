@@ -61,11 +61,13 @@ def main() -> int:
         LOGGER.info("fak_confirm  = %s (GET /order after FAK when needed)", config.polymarket_fak_confirm_get_order)
         pforce = config.paladin_pair_sum_max_on_forced_hedge
         LOGGER.info(
-            "paladin_pair = 2nd_leg_sum<=%.3f | hedge_timer_2nd_sum<=%s | roi>=%.3f on 2nd | 1st_leg_side<=%.3f",
+            "paladin_pair = pair_sum_max=%.3f (symmetric / tighten) | hedge_timer_2nd_sum<=%s | roi>=%.3f on 2nd | "
+            "1st_leg_side<=%.3f | stagger_2nd_live_mid_gate=%s (false=held post_fill avg cap)",
             config.paladin_pair_sum_max,
             f"{pforce:.3f}" if pforce is not None else "strict",
             config.paladin_target_min_roi,
             config.paladin_first_leg_max_px,
+            config.paladin_stagger_second_leg_require_live_mid_pair_sum,
         )
         LOGGER.info(
             "paladin_entry= stagger=%s hedge_force_s=%s max_sh/side=%s clip_cap=%.0f cooldown=%.2fs",

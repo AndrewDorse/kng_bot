@@ -28,10 +28,15 @@ from trader import PolymarketTrader
 
 _REPO_ROOT = Path(__file__).resolve().parent
 MIMIC_PARAMS_JSON = _REPO_ROOT / "exports" / "wallet10_mimic_search.json"
+IY2_PARAMS_JSON = _REPO_ROOT / "strategy_params" / "iy2_summary.json"
+IY3_PARAMS_JSON = _REPO_ROOT / "strategy_params" / "iy3_summary.json"
 AA1_STRATEGY_PROFILE_ID = "AA1_deep_v1_m42_d03_cd15_ml8_c30_tp97"
 STRATEGY_0_PROFILE_ID = "STRATEGY_0_current_v1"
 STRATEGY_0_META_PROFILE_ID = "STRATEGY_0_meta_public_v4_delay12_wr739_pnl1386"
 MIMIC_STRATEGY_PROFILE_ID = "MIMIC_wallet10_fixed_lot5_v1"
+IY2_STRATEGY_PROFILE_ID = "IY2_wallet_overlap_v1"
+IY3_STRATEGY_PROFILE_ID = "IY3_wallet_overlap_path_v1"
+IY2_MAX_IMBALANCE_SHARES = 5
 WD_STRATEGY_PROFILE_ID = "WD_wallet_strict_v1"
 VOLUME_T10_STRATEGY_PROFILE_ID = "BTC_VOLUME_T10_dual_v1"
 VOLUME_T10_HYBRID_STRATEGY_PROFILE_ID = "BTC_VOLUME_T10_hybrid_v2"
@@ -56,6 +61,32 @@ def _load_mimic_search_params(path: Path) -> dict[str, float] | None:
         raw = data.get("best", {}).get("params")
         if isinstance(raw, dict) and raw:
             return raw  # type: ignore[return-value]
+    except (OSError, json.JSONDecodeError, TypeError, KeyError):
+        pass
+    return None
+
+
+def _load_best_params_json(path: Path) -> dict[str, float] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = data.get("best_params")
+        if isinstance(raw, dict) and raw:
+            merged = dict(raw)
+            for key in (
+                "bucket_targets",
+                "freeze_roi",
+                "improvement_min",
+                "cheap_buffer",
+                "candidate_share_cap",
+                "same_side_dedupe_seconds",
+                "same_side_dedupe_price_band",
+                "enable_target_prop_override",
+                "path_spend_scale",
+                "extreme_cheap_max_price",
+            ):
+                if key in data:
+                    merged[key] = data[key]
+            return merged  # type: ignore[return-value]
     except (OSError, json.JSONDecodeError, TypeError, KeyError):
         pass
     return None
@@ -333,6 +364,7 @@ SUB_TWO_SHARE_MARKET_CHECK_SECONDS = 5.0
 # btc_perp15: min seconds between end-window market dump attempts per side (avoid spam).
 BTC_PERP15_END_DUMP_THROTTLE_SECONDS = 2.0
 EXIT_RECONCILE_INTERVAL_SECONDS = 30.0
+HOLD_TO_REDEEM_RELEASE_SECONDS = 30.0
 # "current" phase ramp (same as run_named_profiles strategy_0 / price-history replay).
 PHASE_SPEND_CAPS = (
     (60, 0.05),
@@ -580,6 +612,35 @@ class Btc15RedeemEngine:
                     MIMIC_PARAMS_JSON,
                 )
 
+        self._iy2_params: dict[str, float] = {}
+        self._iy2_action_queue: deque[OrderCandidate] = deque()
+        self._iy2_last_base_elapsed = -10_000.0
+        self._iy2_last_winner_elapsed = -10_000.0
+        self._iy2_last_hedge_elapsed = -10_000.0
+        self._iy2_last_repair_elapsed = -10_000.0
+        self._iy2_last_late_elapsed = -10_000.0
+        self._iy2_last_maint_elapsed = -10_000.0
+        self._iy2_last_rebalance_elapsed = -10_000.0
+        self._iy2_last_safety_elapsed = -10_000.0
+        self._iy2_last_value_elapsed = -10_000.0
+        self._iy2_last_deep_elapsed = -10_000.0
+        self._iy2_base_locked = False
+        self._iy2_last_fill_elapsed: dict[str, float] = {"UP": -10_000.0, "DOWN": -10_000.0}
+        self._iy2_last_fill_price: dict[str, float | None] = {"UP": None, "DOWN": None}
+        self._iy2_last_filled_side: str | None = None
+        self._iy2_last_fail_elapsed: dict[str, float] = {"UP": -10_000.0, "DOWN": -10_000.0}
+        if self.config.strategy_mode in {"iy2", "iy3"}:
+            iy_params_path = IY3_PARAMS_JSON if self.config.strategy_mode == "iy3" else IY2_PARAMS_JSON
+            loaded = _load_best_params_json(iy_params_path)
+            if loaded:
+                self._iy2_params = loaded
+            else:
+                LOGGER.error(
+                    "strategy_mode=%s but could not load params from %s, falling back to aa1",
+                    self.config.strategy_mode,
+                    iy_params_path,
+                )
+
         self._box_lot_counts: dict[str, int] = {"UP": 0, "DOWN": 0}
         self._box_last_side_elapsed: dict[str, float | None] = {"UP": None, "DOWN": None}
         self._champ4_action_queue: deque[OrderCandidate] = deque()
@@ -595,6 +656,12 @@ class Btc15RedeemEngine:
 
     def _strategy_mode_champ4_6s(self) -> bool:
         return self.config.strategy_mode == "champ4_6s"
+
+    def _strategy_mode_iy2(self) -> bool:
+        return self.config.strategy_mode in {"iy2", "iy3"} and bool(self._iy2_params)
+
+    def _strategy_mode_iy3(self) -> bool:
+        return self.config.strategy_mode == "iy3" and bool(self._iy2_params)
 
     def _strategy_mode_box_balance(self) -> bool:
         return self.config.strategy_mode == "box_balance"
@@ -629,6 +696,7 @@ class Btc15RedeemEngine:
     def _strategy_mode_hold_to_redeem(self) -> bool:
         return (
             self._strategy_mode_champ4_6s()
+            or self._strategy_mode_iy2()
             or self._strategy_mode_mimic()
             or self._strategy_mode_box_balance()
             or self._strategy_mode_volume_t10()
@@ -638,6 +706,8 @@ class Btc15RedeemEngine:
     def _profile_label(self) -> str:
         if self._strategy_mode_champ4_6s():
             return CHAMP4_6S_PROFILE_ID
+        if self._strategy_mode_iy2():
+            return IY2_STRATEGY_PROFILE_ID
         if self._strategy_mode_box_balance():
             return BOX_STRATEGY_PROFILE_ID
         if self._strategy_mode_mimic():
@@ -784,9 +854,10 @@ class Btc15RedeemEngine:
 
         open_orders = self._get_contract_orders(contract)
         self._maybe_enter_early_exit_mode(contract)
+        allow_hold_release = self._strategy_mode_hold_to_redeem() and seconds_remaining <= HOLD_TO_REDEEM_RELEASE_SECONDS
         if (
             not self._strategy_mode_hold_to_redeem() and not self._strategy_mode_signal_only()
-        ) or self._strategy_mode_volume_t10() or self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15():
+        ) or self._strategy_mode_volume_t10() or self._strategy_mode_volume_scalp_up() or self._strategy_mode_btc_perp15() or allow_hold_release:
             self._manage_exit_orders(contract, open_orders)
             self._maybe_btc_perp15_end_window_market_dump(contract, seconds_remaining)
             self._cleanup_small_leftovers(contract, seconds_remaining, time.time())
@@ -815,11 +886,20 @@ class Btc15RedeemEngine:
             )
         elif self._tp_phase_started and not self._strategy_mode_hold_to_redeem() and not self._strategy_mode_volume_t10() and not self._strategy_mode_volume_scalp_up() and not self._strategy_mode_btc_perp15():
             self._no_signal_reason = "exit mode active"
-        elif elapsed >= self.config.strategy_entry_delay_seconds:
+        elif elapsed >= (
+            int(self._iy2_params.get("entry_delay", self.config.strategy_entry_delay_seconds))
+            if self._strategy_mode_iy2()
+            else self.config.strategy_entry_delay_seconds
+        ):
             if self._strategy_mode_champ4_6s():
                 self._champ4_evaluate_tick(elapsed)
                 snapshot = self._process_candidate_queue(contract, snapshot, elapsed, self._champ4_action_queue)
                 if not self._champ4_action_queue and self._no_signal_reason:
+                    LOGGER.debug("[WAIT] %s | %s", contract.slug, self._no_signal_reason)
+            elif self._strategy_mode_iy2():
+                self._iy2_evaluate_tick(snapshot, elapsed, seconds_remaining)
+                snapshot = self._process_candidate_queue(contract, snapshot, elapsed, self._iy2_action_queue)
+                if not self._iy2_action_queue and self._no_signal_reason:
                     LOGGER.debug("[WAIT] %s | %s", contract.slug, self._no_signal_reason)
             elif self._strategy_mode_mimic():
                 self._mimic_evaluate_tick(elapsed)
@@ -973,6 +1053,23 @@ class Btc15RedeemEngine:
         self._mimic_prev_winner = None
         self._mimic_consecutive_same_winner = 0
 
+        self._iy2_action_queue.clear()
+        self._iy2_last_base_elapsed = -10_000.0
+        self._iy2_last_winner_elapsed = -10_000.0
+        self._iy2_last_hedge_elapsed = -10_000.0
+        self._iy2_last_repair_elapsed = -10_000.0
+        self._iy2_last_late_elapsed = -10_000.0
+        self._iy2_last_maint_elapsed = -10_000.0
+        self._iy2_last_rebalance_elapsed = -10_000.0
+        self._iy2_last_safety_elapsed = -10_000.0
+        self._iy2_last_value_elapsed = -10_000.0
+        self._iy2_last_deep_elapsed = -10_000.0
+        self._iy2_base_locked = False
+        self._iy2_last_fill_elapsed = {"UP": -10_000.0, "DOWN": -10_000.0}
+        self._iy2_last_fill_price = {"UP": None, "DOWN": None}
+        self._iy2_last_filled_side = None
+        self._iy2_last_fail_elapsed = {"UP": -10_000.0, "DOWN": -10_000.0}
+
         self._box_lot_counts = {"UP": 0, "DOWN": 0}
         self._box_last_side_elapsed = {"UP": None, "DOWN": None}
         self._champ4_action_queue.clear()
@@ -1034,6 +1131,22 @@ class Btc15RedeemEngine:
                 CHAMP4_MID1_DELAY_SECONDS,
                 CHAMP4_MID2_DELAY_SECONDS,
                 CHAMP4_LATE_DELAY_SECONDS,
+            )
+        elif self._strategy_mode_iy2():
+            p = self._iy2_params
+            LOGGER.info(
+                "[STRATEGY PARAMS] %s | profile=%s | iy2_json=%s | wallet_path buckets=%d | entry=%ss cutoff=%ss | "
+                "freeze=%.2f improve=%.3f cheap_buf=%.2f share_cap=%s",
+                contract.slug,
+                self._profile_label(),
+                IY2_PARAMS_JSON.name,
+                len(p.get("bucket_targets", []) or []),
+                p.get("entry_delay"),
+                p.get("cutoff"),
+                float(p.get("freeze_roi", 0.05) or 0.05),
+                float(p.get("improvement_min", 0.015) or 0.015),
+                float(p.get("cheap_buffer", 0.03) or 0.03),
+                p.get("candidate_share_cap", 25),
             )
         elif self._strategy_mode_mimic():
             mp = self._mimic_params
@@ -1382,6 +1495,12 @@ class Btc15RedeemEngine:
             self._down_spend += notional
         if order.reason == "aa1_buy_cheap":
             self._aa1_record_cheap_fill(order.side_label, order.price, self._current_elapsed)
+        elif order.reason.startswith("iy2|"):
+            self._iy2_last_fill_elapsed[order.side_label] = self._current_elapsed
+            self._iy2_last_fill_price[order.side_label] = float(order.price)
+            self._iy2_last_filled_side = order.side_label
+            if self._up_shares > 0 and self._down_shares > 0:
+                self._iy2_base_locked = True
         elif order.reason.startswith("aa1_balance|"):
             self._aa1_mark_balance_fill(order.reason)
         elif (
@@ -1703,7 +1822,9 @@ class Btc15RedeemEngine:
             LOGGER.info("[EARLY EXIT] %s | winner_side=%s", contract.slug, winner_side)
 
     def _manage_exit_orders(self, contract: ActiveContract, open_orders: list[dict[str, Any]]) -> None:
-        if not self._tp_phase_started and not self._strategy_mode_volume_scalp_up() and not self._strategy_mode_btc_perp15():
+        seconds_remaining = max(0.0, contract.end_time.timestamp() - time.time())
+        hold_release_active = self._strategy_mode_hold_to_redeem() and seconds_remaining <= HOLD_TO_REDEEM_RELEASE_SECONDS
+        if not self._tp_phase_started and not self._strategy_mode_volume_scalp_up() and not self._strategy_mode_btc_perp15() and not hold_release_active:
             return
 
         open_ids = self._extract_live_ids(open_orders)
@@ -1712,6 +1833,20 @@ class Btc15RedeemEngine:
 
         if self._strategy_mode_btc_perp15():
             self._btc_perp15_ensure_tp_limit(contract)
+            return
+
+        if hold_release_active:
+            if seconds_remaining <= self.config.force_exit_before_end_seconds:
+                self._force_late_exit_cleanup(contract)
+                return
+            for side_label in ("UP", "DOWN"):
+                self._ensure_exit_sell(
+                    contract,
+                    side_label,
+                    self._desired_exit_price(contract, side_label, "tp"),
+                    purpose="tp",
+                )
+            self._force_late_exit_cleanup(contract)
             return
 
         if self._exit_mode_winner_side is not None:
@@ -1866,8 +2001,7 @@ class Btc15RedeemEngine:
         for side_label, managed in list(self._exit_orders_by_side.items()):
             if managed.order_id in open_ids:
                 continue
-            token = contract.up if side_label == "UP" else contract.down
-            balance = self.trader.token_balance(token.token_id)
+            balance = self._safe_exit_position_shares(contract, side_label)
             if balance < 1:
                 self._fully_exited_sides.add(side_label)
                 LOGGER.info(
@@ -1927,8 +2061,7 @@ class Btc15RedeemEngine:
             age = now - managed.placed_at
             if age < EXIT_RECONCILE_INTERVAL_SECONDS:
                 continue
-            token = contract.up if side_label == "UP" else contract.down
-            live_balance = int(self.trader.token_balance(token.token_id))
+            live_balance = int(self._safe_exit_position_shares(contract, side_label))
             if managed.purpose == "scalp_tp":
                 desired_price = managed.price
             else:
@@ -1964,7 +2097,7 @@ class Btc15RedeemEngine:
         for side_label, token in (("UP", contract.up), ("DOWN", contract.down)):
             if side_label in self._fully_exited_sides:
                 continue
-            balance = self.trader.token_balance(token.token_id)
+            balance = self._safe_exit_position_shares(contract, side_label)
             if balance < 1:
                 continue
             active = self._exit_orders_by_side.get(side_label)
@@ -2036,15 +2169,18 @@ class Btc15RedeemEngine:
             return
 
         token = contract.up if side_label == "UP" else contract.down
-        balance = self.trader.token_balance(token.token_id)
+        balance = self._safe_exit_position_shares(contract, side_label)
         size = int(balance)
-        if size < 1:
+        min_exit_shares = 1 if purpose != "tp" else max(1, self.config.shares_per_level)
+        if size < min_exit_shares:
             LOGGER.info(
-                "[EXIT SKIP] %s | side=%s | purpose=%s | balance=%.4f < 1 share",
+                "[EXIT SKIP] %s | side=%s | purpose=%s | balance=%.4f < %d share%s",
                 contract.slug,
                 side_label,
                 purpose,
                 balance,
+                min_exit_shares,
+                "" if min_exit_shares == 1 else "s",
             )
             if balance < 1:
                 self._fully_exited_sides.add(side_label)
@@ -2077,9 +2213,10 @@ class Btc15RedeemEngine:
                 price,
             )
             return None
+        min_exit_shares = 1 if purpose != "tp" else max(1, self.config.shares_per_level)
         attempt_size = size
         attempts = 0
-        while attempt_size >= 1 and attempts < 8:
+        while attempt_size >= min_exit_shares and attempts < 8:
             attempts += 1
             try:
                 resp = self.trader.place_limit_sell(token, price, attempt_size)
@@ -2130,6 +2267,8 @@ class Btc15RedeemEngine:
                     return None
                 if next_size is None or next_size >= attempt_size:
                     next_size = attempt_size - 1
+                if next_size is not None and next_size < min_exit_shares:
+                    next_size = None
                 attempt_size = next_size
 
         LOGGER.warning(
@@ -2497,12 +2636,17 @@ class Btc15RedeemEngine:
         rounds = len(queue)
         if rounds <= 0:
             return snapshot
+        placed_any = False
         for _ in range(rounds):
             candidate = queue.popleft()
+            if placed_any and self._strategy_mode_iy2():
+                queue.appendleft(candidate)
+                break
             open_orders = self._get_contract_orders(contract)
             if self._can_place_candidate(snapshot, candidate, open_orders, elapsed):
                 if self._place_candidate(contract, candidate, snapshot, elapsed):
                     snapshot = self._build_snapshot()
+                    placed_any = True
                     continue
             queue.append(candidate)
         return snapshot
@@ -3723,6 +3867,532 @@ class Btc15RedeemEngine:
         if not self._mimic_action_queue and not self._no_signal_reason:
             self._no_signal_reason = "mimic: no rule fired this tick"
 
+    def _iy2_price_lookback(self, side_label: str, lookback_seconds: int) -> float | None:
+        if not self._price_history:
+            return None
+        target_ts = self._last_price_time - lookback_seconds
+        for point in reversed(self._price_history):
+            if point.ts <= target_ts:
+                return point.up_price if side_label == "UP" else point.down_price
+        oldest = self._price_history[0]
+        return oldest.up_price if side_label == "UP" else oldest.down_price
+
+    def _iy2_btc_price_lookback(self, lookback_seconds: int) -> float | None:
+        if not self._btc_price_history:
+            return None
+        target_ts = self._last_price_time - lookback_seconds
+        for point in reversed(self._btc_price_history):
+            if point.ts <= target_ts:
+                return point.price
+        return self._btc_price_history[0].price if self._btc_price_history else None
+
+    def _iy2_roi_pair(self, snapshot: BookSnapshot) -> tuple[float, float]:
+        total = snapshot.total_spend
+        if total <= 0:
+            return 0.0, 0.0
+        return snapshot.up_pnl_if_win / total, snapshot.down_pnl_if_win / total
+
+    def _iy2_shares_for_notional(self, notional: float, ref_price: float) -> tuple[int, int]:
+        lot = max(1, self.config.shares_per_level)
+        safe_price = max(0.01, round(ref_price, 2))
+        raw_shares = max(
+            self._minimum_order_shares(safe_price),
+            int(math.ceil(max(notional, MIN_MARKETABLE_BUY_NOTIONAL) / safe_price)),
+        )
+        rounded = int(math.ceil(raw_shares / lot) * lot)
+        return rounded, max(lot, self._minimum_order_shares(safe_price))
+
+    def _iy2_max_shares_for_reason(self, reason: str) -> int:
+        lot = max(1, self.config.shares_per_level)
+        caps = {
+            "base": 10,
+            "winner": 15,
+            "hedge": 10,
+            "repair": 10,
+            "late": 10,
+            "maintenance": 10,
+            "rebalance": 15,
+            "safety": 15,
+            "value": 10,
+            "deep": 15,
+        }
+        for key, cap in caps.items():
+            if f"|{key}|" in reason:
+                return max(lot, int(math.ceil(cap / lot) * lot))
+        return max(lot, 15)
+
+    def _iy2_queue_candidate(
+        self,
+        queue: deque[OrderCandidate],
+        side_label: str,
+        notional: float,
+        reason: str,
+        *,
+        kind: str = "primary",
+    ) -> bool:
+        ref = self._side_price(side_label)
+        if ref <= 0:
+            return False
+        last_fill_elapsed = self._iy2_last_fill_elapsed.get(side_label, -10_000.0)
+        last_fill_price = self._iy2_last_fill_price.get(side_label)
+        if (
+            last_fill_price is not None
+            and (self._current_elapsed - last_fill_elapsed) <= 120.0
+            and abs(ref - last_fill_price) <= 0.03
+        ):
+            return False
+        shares, min_shares = self._iy2_shares_for_notional(notional, ref)
+        max_shares = self._iy2_max_shares_for_reason(reason)
+        if min_shares > max_shares:
+            return False
+        shares = min(shares, max_shares)
+        queue.append(
+            OrderCandidate(
+                side_label=side_label,
+                kind=kind,
+                reference_price=ref,
+                limit_ceiling=min(0.99, round(ref + 0.05, 2)),
+                reason=reason,
+                shares=shares,
+                min_shares=min_shares,
+            )
+        )
+        return True
+
+    def _iy2_wallet_bucket_target(self, bucket_idx: int, budget_cap: float) -> dict[str, float | str]:
+        rows = self._iy2_params.get("bucket_targets")
+        if not isinstance(rows, list) or not rows:
+            label = f"{bucket_idx*30:03d}-{bucket_idx*30+29:03d}"
+            return {
+                "bucket_label": label,
+                "up_notional_target": 0.0,
+                "down_notional_target": 0.0,
+                "avg_up_target": 0.0,
+                "avg_down_target": 0.0,
+                "up_shares_target": 0.0,
+                "down_shares_target": 0.0,
+                "up_share_ratio_0_1": 0.5,
+            }
+        idx = min(max(int(bucket_idx), 0), len(rows) - 1)
+        row = rows[idx] if isinstance(rows[idx], dict) else {}
+        up_notional = budget_cap * float(row.get("cum_up_notional_frac", 0.0) or 0.0)
+        down_notional = budget_cap * float(row.get("cum_down_notional_frac", 0.0) or 0.0)
+        avg_up_target = float(row.get("avg_up", 0.0) or 0.0)
+        avg_down_target = float(row.get("avg_down", 0.0) or 0.0)
+        up_shares_target = (up_notional / avg_up_target) if avg_up_target > 0 else 0.0
+        down_shares_target = (down_notional / avg_down_target) if avg_down_target > 0 else 0.0
+        return {
+            "bucket_label": str(row.get("bucket_label") or f"{bucket_idx*30:03d}-{bucket_idx*30+29:03d}"),
+            "up_notional_target": up_notional,
+            "down_notional_target": down_notional,
+            "avg_up_target": avg_up_target,
+            "avg_down_target": avg_down_target,
+            "up_shares_target": up_shares_target,
+            "down_shares_target": down_shares_target,
+            "up_share_ratio_0_1": float(row.get("up_share_ratio_0_1", 0.5) or 0.5),
+        }
+
+    def _iy2_wallet_path_distance(
+        self,
+        up_shares: float,
+        down_shares: float,
+        up_cost: float,
+        down_cost: float,
+        target: dict[str, float | str],
+        budget_cap: float,
+        freeze_roi: float,
+    ) -> float:
+        total_cost = up_cost + down_cost
+        if total_cost > 0:
+            up_roi = (up_shares / total_cost) - 1.0
+            down_roi = (down_shares / total_cost) - 1.0
+        else:
+            up_roi = down_roi = 0.0
+        target_up_shares = float(target.get("up_shares_target", 0.0) or 0.0)
+        target_down_shares = float(target.get("down_shares_target", 0.0) or 0.0)
+        target_up_notional = float(target.get("up_notional_target", 0.0) or 0.0)
+        target_down_notional = float(target.get("down_notional_target", 0.0) or 0.0)
+        target_avg_up = float(target.get("avg_up_target", 0.0) or 0.0)
+        target_avg_down = float(target.get("avg_down_target", 0.0) or 0.0)
+        target_ratio = float(target.get("up_share_ratio_0_1", 0.5) or 0.5)
+        size_gap = (
+            abs(up_shares - target_up_shares) / max(target_up_shares, float(max(1, self.config.shares_per_level)))
+            + abs(down_shares - target_down_shares) / max(target_down_shares, float(max(1, self.config.shares_per_level)))
+        )
+        notional_gap = (
+            abs(up_cost - target_up_notional) / max(budget_cap, 1.0)
+            + abs(down_cost - target_down_notional) / max(budget_cap, 1.0)
+        )
+        avg_gap = 0.0
+        if target_up_shares > 0 and up_shares > 0 and target_avg_up > 0:
+            avg_gap += abs((up_cost / up_shares) - target_avg_up)
+        if target_down_shares > 0 and down_shares > 0 and target_avg_down > 0:
+            avg_gap += abs((down_cost / down_shares) - target_avg_down)
+        total_shares = up_shares + down_shares
+        ratio = (up_shares / total_shares) if total_shares > 0 else 0.5
+        ratio_gap = abs(ratio - target_ratio)
+        risk_gap = max(0.0, freeze_roi - up_roi) + max(0.0, freeze_roi - down_roi)
+        return 1.5 * size_gap + 1.1 * notional_gap + 0.9 * avg_gap + 0.8 * ratio_gap + 0.35 * risk_gap
+
+    @staticmethod
+    def _iy2_dominant_side(up_shares: float, down_shares: float) -> str:
+        if up_shares == down_shares:
+            return "UP"
+        return "UP" if up_shares > down_shares else "DOWN"
+
+    @staticmethod
+    def _iy2_dominant_ratio(up_shares: float, down_shares: float) -> float:
+        total = up_shares + down_shares
+        return max(up_shares, down_shares) / total if total > 0 else 0.5
+
+    def _iy2_required_repair_side(self, up_shares: float, down_shares: float) -> str | None:
+        if up_shares > 0 and down_shares <= 0:
+            return "DOWN"
+        if down_shares > 0 and up_shares <= 0:
+            return "UP"
+        if up_shares > down_shares:
+            return "DOWN"
+        if down_shares > up_shares:
+            return "UP"
+        return None
+
+    def _iy2_projected_worst_roi(
+        self,
+        up_shares: float,
+        down_shares: float,
+        up_cost: float,
+        down_cost: float,
+        side_label: str,
+        fill_price: float,
+        shares: int,
+    ) -> float:
+        next_up_shares = up_shares + (shares if side_label == "UP" else 0.0)
+        next_down_shares = down_shares + (shares if side_label == "DOWN" else 0.0)
+        next_up_cost = up_cost + (fill_price * shares if side_label == "UP" else 0.0)
+        next_down_cost = down_cost + (fill_price * shares if side_label == "DOWN" else 0.0)
+        next_total_cost = next_up_cost + next_down_cost
+        if next_total_cost <= 0:
+            return 0.0
+        up_roi = (next_up_shares / next_total_cost) - 1.0
+        down_roi = (next_down_shares / next_total_cost) - 1.0
+        return min(up_roi, down_roi)
+
+    def _iy2_weak_side_name(
+        self,
+        up_shares: float,
+        down_shares: float,
+        up_cost: float,
+        down_cost: float,
+    ) -> str:
+        total_cost = up_cost + down_cost
+        if total_cost <= 0:
+            return "UP" if up_shares <= down_shares else "DOWN"
+        up_roi = (up_shares / total_cost) - 1.0
+        down_roi = (down_shares / total_cost) - 1.0
+        if abs(up_roi - down_roi) <= 1e-9:
+            return "UP" if up_shares <= down_shares else "DOWN"
+        return "UP" if up_roi < down_roi else "DOWN"
+
+    def _iy2_pair_sum(self, up_shares: float, down_shares: float, up_cost: float, down_cost: float) -> float:
+        up_avg = (up_cost / up_shares) if up_shares > 0 else 0.0
+        down_avg = (down_cost / down_shares) if down_shares > 0 else 0.0
+        return up_avg + down_avg
+
+    def _iy2_cheap_accumulation_override(
+        self,
+        *,
+        current_up_shares: float,
+        current_down_shares: float,
+        current_up_cost: float,
+        current_down_cost: float,
+        side_label: str,
+        fill_price: float,
+        shares: int,
+        target_avg: float,
+        cheap_buffer: float,
+        weak_roi_floor: float,
+    ) -> bool:
+        current_total_cost = current_up_cost + current_down_cost
+        if current_total_cost <= 0:
+            return False
+        if (side_label == "UP" and current_up_shares <= 0) or (side_label == "DOWN" and current_down_shares <= 0):
+            return False
+        weak_side = self._iy2_weak_side_name(
+            current_up_shares,
+            current_down_shares,
+            current_up_cost,
+            current_down_cost,
+        )
+        if side_label != weak_side:
+            return False
+        next_up_shares = current_up_shares + (shares if side_label == "UP" else 0.0)
+        next_down_shares = current_down_shares + (shares if side_label == "DOWN" else 0.0)
+        if abs(next_up_shares - next_down_shares) > IY2_MAX_IMBALANCE_SHARES:
+            return False
+        next_up_cost = current_up_cost + (fill_price * shares if side_label == "UP" else 0.0)
+        next_down_cost = current_down_cost + (fill_price * shares if side_label == "DOWN" else 0.0)
+        current_worst_roi = min(
+            (current_up_shares / current_total_cost) - 1.0,
+            (current_down_shares / current_total_cost) - 1.0,
+        )
+        projected_worst_roi = self._iy2_projected_worst_roi(
+            current_up_shares,
+            current_down_shares,
+            current_up_cost,
+            current_down_cost,
+            side_label,
+            fill_price,
+            shares,
+        )
+        current_side_shares = current_up_shares if side_label == "UP" else current_down_shares
+        current_side_cost = current_up_cost if side_label == "UP" else current_down_cost
+        current_avg = (current_side_cost / current_side_shares) if current_side_shares > 0 else 0.0
+        current_pair = self._iy2_pair_sum(current_up_shares, current_down_shares, current_up_cost, current_down_cost)
+        projected_pair = self._iy2_pair_sum(next_up_shares, next_down_shares, next_up_cost, next_down_cost)
+        cheap_enough = (
+            fill_price <= 0.20
+            or (target_avg > 0 and fill_price <= (target_avg + cheap_buffer))
+            or (current_avg > 0 and fill_price <= max(0.01, current_avg - 0.02))
+        )
+        pair_improves = projected_pair <= (current_pair - 0.02)
+        allowed_floor = min(current_worst_roi - 0.03, weak_roi_floor - 0.02)
+        roi_not_much_worse = projected_worst_roi >= allowed_floor
+        return cheap_enough and pair_improves and roi_not_much_worse
+
+    def _iy2_target_proportion_override(
+        self,
+        *,
+        current_up_shares: float,
+        current_down_shares: float,
+        current_up_cost: float,
+        current_down_cost: float,
+        side_label: str,
+        fill_price: float,
+        shares: int,
+        target: dict[str, Any],
+        budget_cap: float,
+    ) -> bool:
+        current_total_cost = current_up_cost + current_down_cost
+        current_total_shares = current_up_shares + current_down_shares
+        if current_total_cost <= 0 or current_total_shares <= 0:
+            return False
+        next_up_shares = current_up_shares + (shares if side_label == "UP" else 0.0)
+        next_down_shares = current_down_shares + (shares if side_label == "DOWN" else 0.0)
+        if abs(next_up_shares - next_down_shares) > IY2_MAX_IMBALANCE_SHARES:
+            return False
+        next_total_cost = current_total_cost + (fill_price * shares)
+        target_total_notional = float(target.get("up_notional_target", 0.0) or 0.0) + float(
+            target.get("down_notional_target", 0.0) or 0.0
+        )
+        path_spend_scale = float(self._iy2_params.get("path_spend_scale", 0.55) or 0.55)
+        path_budget = min(budget_cap, target_total_notional * path_spend_scale)
+        target_ratio = float(target.get("up_share_ratio_0_1", 0.5) or 0.5)
+        current_ratio = current_up_shares / current_total_shares if current_total_shares > 0 else 0.5
+        next_total_shares = next_up_shares + next_down_shares
+        next_ratio = next_up_shares / next_total_shares if next_total_shares > 0 else current_ratio
+        ratio_gain = abs(current_ratio - target_ratio) - abs(next_ratio - target_ratio)
+        weak_side = self._iy2_weak_side_name(
+            current_up_shares,
+            current_down_shares,
+            current_up_cost,
+            current_down_cost,
+        )
+        extreme_cheap_max = float(self._iy2_params.get("extreme_cheap_max_price", 0.12) or 0.12)
+        under_path_budget = next_total_cost <= (path_budget + 1e-9)
+        extreme_cheap_follow = side_label == weak_side and fill_price <= extreme_cheap_max and ratio_gain >= -0.05
+        return (ratio_gain > 1e-9 and under_path_budget) or extreme_cheap_follow
+
+    def _iy2_evaluate_tick(self, snapshot: BookSnapshot, elapsed: float, seconds_remaining: float) -> None:
+        self._no_signal_reason = ""
+        if not self._strategy_mode_iy2():
+            return
+        up_price = self._last_up_price or 0.0
+        down_price = self._last_down_price or 0.0
+        if up_price <= 0 or down_price <= 0:
+            self._no_signal_reason = "iy2: waiting for both side prices"
+            return
+        if seconds_remaining <= self.config.strategy_new_order_cutoff_seconds:
+            self._no_signal_reason = "iy2: past new-order cutoff"
+            return
+
+        p = self._iy2_params
+        fail_cooldown = float(p.get("fail_cooldown_seconds", 8.0) or 8.0)
+        queue: deque[OrderCandidate] = deque()
+        local_up_shares = float(snapshot.up_shares)
+        local_down_shares = float(snapshot.down_shares)
+        local_up_cost = float(snapshot.up_spend)
+        local_down_cost = float(snapshot.down_spend)
+        freeze_roi = float(p.get("freeze_roi", 0.05) or 0.05)
+        improvement_min = float(p.get("improvement_min", 0.015) or 0.015)
+        cheap_buffer = float(p.get("cheap_buffer", 0.03) or 0.03)
+        dedupe_seconds = float(p.get("same_side_dedupe_seconds", 30.0) or 30.0)
+        dedupe_band = float(p.get("same_side_dedupe_price_band", 0.02) or 0.02)
+        candidate_share_cap = max(1, self.config.shares_per_level)
+        dominant_ratio_soft = float(p.get("dominant_ratio_soft", 0.62) or 0.62)
+        dominant_ratio_hard = float(p.get("dominant_ratio_hard", 0.68) or 0.68)
+        budget_cap = max(1.0, float(self._window_budget_usdc or self.config.strategy_budget_cap_usdc))
+        total_cost = local_up_cost + local_down_cost
+        up_roi = (local_up_shares / total_cost) - 1.0 if total_cost > 0 else 0.0
+        down_roi = (local_down_shares / total_cost) - 1.0 if total_cost > 0 else 0.0
+        if total_cost > 0 and up_roi >= freeze_roi and down_roi >= freeze_roi:
+            self._no_signal_reason = "iy2: both-side freeze threshold reached"
+            return
+
+        bucket_idx = min(max(int(elapsed // 30), 0), 29)
+        target = self._iy2_wallet_bucket_target(bucket_idx, budget_cap)
+        current_distance = self._iy2_wallet_path_distance(
+            local_up_shares,
+            local_down_shares,
+            local_up_cost,
+            local_down_cost,
+            target,
+            budget_cap,
+            freeze_roi,
+        )
+        current_min_roi = min(up_roi, down_roi) if total_cost > 0 else 0.0
+        current_total_shares = local_up_shares + local_down_shares
+        current_dom_ratio = self._iy2_dominant_ratio(local_up_shares, local_down_shares) if current_total_shares > 0 else 0.5
+        current_dominant_side = self._iy2_dominant_side(local_up_shares, local_down_shares)
+        current_weak_side = self._iy2_weak_side_name(local_up_shares, local_down_shares, local_up_cost, local_down_cost)
+        best_candidate: tuple[float, float, str, int] | None = None
+        required_side = self._iy2_required_repair_side(local_up_shares, local_down_shares)
+
+        for side_label, ref in (("UP", up_price), ("DOWN", down_price)):
+            if required_side is not None and side_label != required_side:
+                continue
+            if (elapsed - self._iy2_last_fail_elapsed.get(side_label, -10_000.0)) < fail_cooldown:
+                continue
+            if ref <= 0:
+                continue
+            last_fill_elapsed = self._iy2_last_fill_elapsed.get(side_label, -10_000.0)
+            last_fill_price = self._iy2_last_fill_price.get(side_label)
+            if (
+                last_fill_price is not None
+                and (elapsed - last_fill_elapsed) <= dedupe_seconds
+                and abs(ref - float(last_fill_price)) <= dedupe_band
+            ):
+                continue
+            target_notional = float(target["up_notional_target"] if side_label == "UP" else target["down_notional_target"])
+            current_notional = local_up_cost if side_label == "UP" else local_down_cost
+            target_avg = float(target["avg_up_target"] if side_label == "UP" else target["avg_down_target"])
+            notional_gap = target_notional - current_notional
+            for shares in range(max(1, self.config.shares_per_level), candidate_share_cap + 1, max(1, self.config.shares_per_level)):
+                candidate_cost = shares * ref
+                if (total_cost + candidate_cost) > (budget_cap + 1e-9):
+                    continue
+                next_up_shares = local_up_shares + (shares if side_label == "UP" else 0.0)
+                next_down_shares = local_down_shares + (shares if side_label == "DOWN" else 0.0)
+                next_up_cost = local_up_cost + (candidate_cost if side_label == "UP" else 0.0)
+                next_down_cost = local_down_cost + (candidate_cost if side_label == "DOWN" else 0.0)
+                next_total_cost = next_up_cost + next_down_cost
+                next_up_roi = (next_up_shares / next_total_cost) - 1.0 if next_total_cost > 0 else 0.0
+                next_down_roi = (next_down_shares / next_total_cost) - 1.0 if next_total_cost > 0 else 0.0
+                next_total_shares = next_up_shares + next_down_shares
+                next_dom_ratio = self._iy2_dominant_ratio(next_up_shares, next_down_shares) if next_total_shares > 0 else 0.5
+                next_dominant_side = self._iy2_dominant_side(next_up_shares, next_down_shares)
+                current_ratio = (local_up_shares / current_total_shares) if current_total_shares > 0 else 0.5
+                next_ratio = (next_up_shares / next_total_shares) if next_total_shares > 0 else current_ratio
+                target_ratio = float(target.get("up_share_ratio_0_1", 0.5) or 0.5)
+                ratio_gain = abs(current_ratio - target_ratio) - abs(next_ratio - target_ratio)
+                if abs(next_up_shares - next_down_shares) > IY2_MAX_IMBALANCE_SHARES:
+                    continue
+                next_distance = self._iy2_wallet_path_distance(
+                    next_up_shares,
+                    next_down_shares,
+                    next_up_cost,
+                    next_down_cost,
+                    target,
+                    budget_cap,
+                    freeze_roi,
+                )
+                improvement = current_distance - next_distance
+                price_ok = target_avg <= 0 or ref <= (target_avg + cheap_buffer)
+                risk_improves = min(next_up_roi, next_down_roi) > (current_min_roi + 0.002)
+                target_catchup = notional_gap > 0.01
+                worsens_floor = total_cost > 0 and min(next_up_roi, next_down_roi) < (current_min_roi - 0.003)
+                lopsided_worsens = (
+                    total_cost > 0
+                    and next_dom_ratio > dominant_ratio_soft
+                    and next_dom_ratio > current_dom_ratio + 0.01
+                    and next_dominant_side == side_label
+                )
+                dominant_chase = (
+                    total_cost > 0
+                    and side_label == current_dominant_side
+                    and current_dom_ratio >= 0.55
+                    and not risk_improves
+                    and not price_ok
+                )
+                side_missing = (side_label == "UP" and local_up_shares <= 0) or (side_label == "DOWN" and local_down_shares <= 0)
+                bootstrap_ok = (total_cost <= 0 and side_missing and target_catchup and price_ok) or (
+                    total_cost > 0 and current_total_shares > 0 and side_missing and target_catchup and price_ok
+                )
+                cheap_accum_ok = (
+                    total_cost > 0
+                    and not side_missing
+                    and side_label == current_weak_side
+                    and self._iy2_cheap_accumulation_override(
+                        current_up_shares=local_up_shares,
+                        current_down_shares=local_down_shares,
+                        current_up_cost=local_up_cost,
+                        current_down_cost=local_down_cost,
+                        side_label=side_label,
+                        fill_price=ref,
+                        shares=shares,
+                        target_avg=target_avg,
+                        cheap_buffer=cheap_buffer,
+                        weak_roi_floor=float(target.get("weak_roi_floor", 0.0) or 0.0),
+                    )
+                )
+                target_prop_ok = self._strategy_mode_iy3() and self._iy2_target_proportion_override(
+                    current_up_shares=local_up_shares,
+                    current_down_shares=local_down_shares,
+                    current_up_cost=local_up_cost,
+                    current_down_cost=local_down_cost,
+                    side_label=side_label,
+                    fill_price=ref,
+                    shares=shares,
+                    target=target,
+                    budget_cap=budget_cap,
+                )
+                if total_cost > 0 and not side_missing and min(next_up_roi, next_down_roi) <= current_min_roi + 1e-9 and not cheap_accum_ok and not target_prop_ok:
+                    continue
+                if next_dom_ratio > dominant_ratio_hard and not bootstrap_ok and not cheap_accum_ok and not target_prop_ok:
+                    continue
+                if ((worsens_floor or lopsided_worsens) and not cheap_accum_ok and not target_prop_ok) or dominant_chase:
+                    continue
+                situation_gain = (
+                    (min(next_up_roi, next_down_roi) - current_min_roi)
+                    - max(0.0, next_dom_ratio - current_dom_ratio)
+                    + max(0.0, ratio_gain) * 3.0
+                )
+                if (
+                    improvement >= improvement_min and (price_ok or risk_improves or target_catchup or bootstrap_ok)
+                ) or cheap_accum_ok or target_prop_ok:
+                    if best_candidate is None or (situation_gain, improvement) > (best_candidate[0], best_candidate[1]):
+                        best_candidate = (situation_gain, improvement, side_label, shares)
+
+        if best_candidate is None:
+            self._no_signal_reason = "iy2: no wallet-path improvement buy this tick"
+            return
+
+        _, _, side_label, shares = best_candidate
+        ref = self._side_price(side_label)
+        reason = f"iy2|wallet_path|side={side_label}|bucket={target['bucket_label']}|alt=1"
+        queue.append(
+            OrderCandidate(
+                side_label=side_label,
+                kind="primary",
+                reference_price=ref,
+                limit_ceiling=min(0.99, round(ref + 0.05, 2)),
+                reason=reason,
+                shares=shares,
+                min_shares=shares,
+                execution_style="normal",
+            )
+        )
+        self._iy2_action_queue.extend(queue)
+
     def _choose_aa1_candidate(
         self,
         snapshot: BookSnapshot,
@@ -3783,6 +4453,15 @@ class Btc15RedeemEngine:
         open_orders: list[dict[str, Any]],
         elapsed: float,
     ) -> bool:
+        if self._strategy_mode_iy2() and self._order_map:
+            self._no_signal_reason = "iy2 waiting for prior buy order resolution"
+            return False
+        if self._strategy_mode_iy2():
+            fail_cooldown = float(self._iy2_params.get("fail_cooldown_seconds", 8.0) or 8.0)
+            if (elapsed - self._iy2_last_fail_elapsed.get(candidate.side_label, -10_000.0)) < fail_cooldown:
+                self._no_signal_reason = f"iy2 fail cooldown active for {candidate.side_label}"
+                return False
+
         if time.time() - self._last_order_time < self.config.order_cooldown_seconds:
             self._no_signal_reason = "order cooldown active"
             return False
@@ -3807,6 +4486,8 @@ class Btc15RedeemEngine:
             elapsed,
             min_shares=candidate.min_shares,
         )
+        if self._strategy_mode_iy2():
+            scaled_shares = min(scaled_shares, max(1, self.config.shares_per_level))
         if scaled_shares <= 0:
             self._no_signal_reason = "insufficient remaining budget for venue-min order"
             return False
@@ -3861,6 +4542,70 @@ class Btc15RedeemEngine:
             return False
 
         projection = self._project_book(snapshot, candidate.side_label, limit_price, shares)
+        if self._strategy_mode_iy2():
+            required_side = self._iy2_required_repair_side(float(snapshot.up_shares), float(snapshot.down_shares))
+            if required_side is not None and candidate.side_label != required_side:
+                self._no_signal_reason = f"iy2 can only buy weaker side {required_side}"
+                return False
+            current_up_shares = float(self._up_shares)
+            current_down_shares = float(self._down_shares)
+            current_up_cost = float(self._up_spend)
+            current_down_cost = float(self._down_spend)
+            current_total_cost = current_up_cost + current_down_cost
+            current_worst_roi = (
+                min((current_up_shares / current_total_cost) - 1.0, (current_down_shares / current_total_cost) - 1.0)
+                if current_total_cost > 0
+                else 0.0
+            )
+            next_up = snapshot.up_shares + (shares if candidate.side_label == "UP" else 0)
+            next_down = snapshot.down_shares + (shares if candidate.side_label == "DOWN" else 0)
+            if abs(next_up - next_down) > IY2_MAX_IMBALANCE_SHARES:
+                self._no_signal_reason = "iy2 projected imbalance exceeds 5 shares"
+                return False
+            side_missing = (candidate.side_label == "UP" and current_up_shares <= 0) or (
+                candidate.side_label == "DOWN" and current_down_shares <= 0
+            )
+            projected_worst_roi = self._iy2_projected_worst_roi(
+                current_up_shares,
+                current_down_shares,
+                current_up_cost,
+                current_down_cost,
+                candidate.side_label,
+                limit_price,
+                shares,
+            )
+            target = self._iy2_wallet_bucket_target(
+                min(max(int(elapsed // 30), 0), 29),
+                max(1.0, float(self._window_budget_usdc or self.config.strategy_budget_cap_usdc)),
+            )
+            cheap_buffer = float(self._iy2_params.get("cheap_buffer", 0.03) or 0.03)
+            target_avg = float(target["avg_up_target"] if candidate.side_label == "UP" else target["avg_down_target"])
+            cheap_accum_ok = self._iy2_cheap_accumulation_override(
+                current_up_shares=current_up_shares,
+                current_down_shares=current_down_shares,
+                current_up_cost=current_up_cost,
+                current_down_cost=current_down_cost,
+                side_label=candidate.side_label,
+                fill_price=limit_price,
+                shares=shares,
+                target_avg=target_avg,
+                cheap_buffer=cheap_buffer,
+                weak_roi_floor=float(target.get("weak_roi_floor", 0.0) or 0.0),
+            )
+            target_prop_ok = self._strategy_mode_iy3() and self._iy2_target_proportion_override(
+                current_up_shares=current_up_shares,
+                current_down_shares=current_down_shares,
+                current_up_cost=current_up_cost,
+                current_down_cost=current_down_cost,
+                side_label=candidate.side_label,
+                fill_price=limit_price,
+                shares=shares,
+                target=target,
+                budget_cap=max(1.0, float(self._window_budget_usdc or self.config.strategy_budget_cap_usdc)),
+            )
+            if current_total_cost > 0 and not side_missing and projected_worst_roi <= current_worst_roi + 1e-9 and not cheap_accum_ok and not target_prop_ok:
+                self._no_signal_reason = "iy2 buy does not improve worst-case roi"
+                return False
 
         if self.config.dry_run:
             order_id = "dry_%d_%s" % (int(time.time() * 1000), candidate.side_label.lower())
@@ -3896,7 +4641,7 @@ class Btc15RedeemEngine:
             return True
 
         try:
-            if order_type == "taker":
+            if order_type == "taker" and not self._strategy_mode_iy2():
                 resp: dict[str, Any] | None = None
                 last_taker_exc: BaseException | None = None
                 for fak_attempt in range(2):
@@ -3942,6 +4687,13 @@ class Btc15RedeemEngine:
                         raise
                 if resp is None:
                     raise last_taker_exc if last_taker_exc else RuntimeError("FAK buy returned no response")
+            elif order_type == "taker":
+                resp = self.trader.place_marketable_buy(
+                    token,
+                    limit_price,
+                    shares,
+                    fee_rate_bps=candidate.fee_rate_bps,
+                )
             else:
                 resp = self.trader.place_limit_buy(
                     token,
@@ -3952,6 +4704,8 @@ class Btc15RedeemEngine:
                 )
             order_id = str(resp.get("orderID") or resp.get("id") or "")
         except Exception as exc:
+            if self._strategy_mode_iy2():
+                self._iy2_last_fail_elapsed[candidate.side_label] = elapsed
             self._no_signal_reason = f"order placement failed: {exc}"
             LOGGER.error(
                 "[ORDER FAILED] %s | kind=%s | side=%s | limit=$%.2f | %s",
@@ -4065,6 +4819,13 @@ class Btc15RedeemEngine:
                 return None, "maker"
             maker_price = round(max(0.01, min(limit_ceiling, best_bid)), 2)
             return maker_price, "maker"
+        if self._strategy_mode_iy2() and execution_style == "taker_best_ask":
+            return self._resolve_limit_price(
+                token,
+                reference_price,
+                limit_ceiling,
+                post_only=False,
+            ), "maker"
         if execution_style == "taker_best_ask":
             best_ask = self.trader.get_best_ask(token.token_id)
             if best_ask is not None and best_ask > 0:
@@ -4113,11 +4874,17 @@ class Btc15RedeemEngine:
         remaining_budget = min(self._phase_cap_usdc(elapsed), self._window_budget_usdc) - committed
         if remaining_budget <= 0:
             return 0
+        lot = max(1, self.config.shares_per_level)
         affordable_shares = int((remaining_budget + 1e-9) // estimated_limit)
+        affordable_shares = int(affordable_shares // lot) * lot
         if affordable_shares < required_min_shares:
             return 0
-        desired_shares = min(max(1, requested_shares), affordable_shares)
-        return max(required_min_shares, desired_shares)
+        desired_shares = min(max(lot, requested_shares), affordable_shares)
+        desired_shares = int(math.ceil(desired_shares / lot) * lot)
+        desired_shares = min(desired_shares, affordable_shares)
+        if desired_shares < required_min_shares:
+            return 0
+        return desired_shares
 
     def _effective_budget(self, wallet_balance_usdc: float) -> float:
         if self.config.dry_run and wallet_balance_usdc <= 0:
@@ -4178,6 +4945,22 @@ class Btc15RedeemEngine:
                 return
         self._order_map.pop(order_id, None)
         self._cancels += 1
+
+    def _tracked_side_shares(self, side_label: str) -> float:
+        return float(self._up_shares if side_label == "UP" else self._down_shares)
+
+    def _safe_exit_position_shares(self, contract: ActiveContract, side_label: str) -> float:
+        token = contract.up if side_label == "UP" else contract.down
+        baseline = self._baseline_up_balance if side_label == "UP" else self._baseline_down_balance
+        tracked = max(0.0, self._tracked_side_shares(side_label))
+        delta = max(0.0, float(self._token_delta(token, baseline)))
+        if tracked <= 0.0:
+            return delta
+        # Some venue/API balance reads can come back in a scaled/raw unit and massively exceed
+        # the actual window inventory. Exit sizing must never trust that larger number.
+        if delta <= 0.0 or delta > max(tracked + 5.0, tracked * 2.0):
+            return tracked
+        return min(tracked, delta)
 
     def _token_delta(self, token: TokenMarket, baseline: float) -> float:
         return round(self.trader.token_balance(token.token_id) - baseline, 4)

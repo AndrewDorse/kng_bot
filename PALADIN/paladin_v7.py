@@ -4,8 +4,9 @@ PALADIN v7 (sim): Binance per-second volume spike + BTC price impulse → Polyma
 
 1) **First leg** when (rolling Binance base-volume vs lookback mean) spikes *and* BTC price moves
    in the same second; side = momentum (price up → UP token, down → DOWN token).
-2) **Second leg** (hedge) on the opposite outcome token: prefer a *cheap* fill
-   (other mid <= 1 - first_avg - margin, optional book-sum cap). If still open after
+2) **Second leg** (hedge) on the opposite outcome token: prefer a *cheap* fill when
+   **first-leg VWAP + current opposite mid** <= ``min(cheap_pair_sum_max, 1 - cheap_other_margin)``
+   (held + quote for the hedge leg — not live ``pm_u+pm_d``, which sits ~1.0). If still open after
    ``hedge_timeout_seconds``, force hedge when pm_up+pm_down <= ``forced_hedge_max_book_sum``.
 3) **Refill** after a balanced pair: smaller clip (>= min_shares) when both mids are below
    leg averages (symmetric improvement), and book sum is tight enough.
@@ -54,7 +55,7 @@ class PaladinV7Params:
     cheap_other_margin: float = 0.04
     cheap_pair_sum_max: float = 0.99
     hedge_timeout_seconds: float = 90.0
-    forced_hedge_max_book_sum: float = 1.03
+    forced_hedge_max_book_sum: float = 1.30
 
     refill_clip_fraction: float = 0.5
     refill_max_pair_sum: float = 0.985
@@ -202,9 +203,11 @@ def paladin_v7_step(
         age = float(t) - float(t0)
         forced = age + 1e-9 >= float(p.hedge_timeout_seconds)
 
-        ok_cheap = px_o + 1e-9 <= (1.0 - float(avg_first) - float(p.cheap_other_margin))
-        if ok_cheap and (pm_u + pm_d) + 1e-9 > float(p.cheap_pair_sum_max):
-            ok_cheap = False
+        # Non-forced: held first-leg VWAP + this tick's opposite mid (same anchor as FAK px).
+        # Tightest of book cap and (1 - margin) keeps sub-$1 pair discipline without gating on pm_u+pm_d.
+        pair_held_quote_sum = float(avg_first) + float(px_o)
+        cap = min(float(p.cheap_pair_sum_max), 1.0 - float(p.cheap_other_margin))
+        ok_cheap = pair_held_quote_sum + 1e-9 <= cap
 
         ok_forced = forced and (pm_u + pm_d) + 1e-9 <= float(p.forced_hedge_max_book_sum)
 

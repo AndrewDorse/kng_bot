@@ -163,10 +163,12 @@ class BotConfig:
     polymarket_ws_enabled: bool = True
     polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     polymarket_fak_confirm_get_order: bool = True
-    # PALADIN live (pair-only): marginal ROI gate on each symmetric add is often stricter than pair_sum_max.
-    # Empty-book approx: need (pm_u+pm_d) <= 1/(1+target_min_roi). At 3% => sum<=0.971; at 2% => sum<=0.980.
-    # Default 0.97: stagger *second* leg waits for pm_up+pm_down <= this (first leg uses single-side max only);
-    # non-forced second leg uses this cap; hedge-force timer can relax via paladin_pair_sum_max_on_forced_hedge.
+    # PALADIN live (pair-only): primary goal is a low *held* pair cost (avg_up + avg_down after fills), not chasing
+    # instantaneous pm_up+pm_down (often ~1.0 in an efficient book). Stagger second leg: default uses post-fill
+    # blended cap (paladin_max_blended_pair_avg_sum) + ROI; set paladin_stagger_second_leg_require_live_mid_pair_sum
+    # True for legacy behavior that also requires live mid sum <= paladin_pair_sum_max until hedge-force.
+    # Symmetric pair opens / sims still use paladin_pair_sum_max on live mids where applicable.
+    # Empty-book ROI hint: (pm_u+pm_d) <= 1/(1+target_min_roi). Hedge-force timer can relax via paladin_pair_sum_max_on_forced_hedge.
     paladin_pair_sum_max: float = 0.97
     # After hedge-force timer: second leg may complete if mid sum <= this (default 1.0 = any valid book).
     paladin_pair_sum_max_on_forced_hedge: float | None = 1.0
@@ -192,6 +194,9 @@ class BotConfig:
     paladin_discipline_relax_after_forced_sec: float | None = 60.0
     # PALADIN v4: stricter second-leg vs book; cap post-fill avg_up+avg_down (both legs must exist for check).
     paladin_second_leg_book_improve_eps: float = 0.013
+    # If True: stagger 2nd leg (non-forced) also requires pm_up+pm_down <= effective pair_sum_max (legacy).
+    # If False (default): 2nd leg is gated on held/post-fill avg via paladin_max_blended_pair_avg_sum + ROI, not live mid sum.
+    paladin_stagger_second_leg_require_live_mid_pair_sum: bool = False
     # Target ~97c blended pair cost: block fills that would push avg_up+avg_down above this.
     paladin_max_blended_pair_avg_sum: float | None = 0.97
     # If True, new stagger first leg (when already holding UP or DOWN) only on higher-mid side.
@@ -201,8 +206,8 @@ class BotConfig:
     paladin_stagger_symmetric_fallback_roi_discount: float = 0.03
     # False: symmetric fallback first leg also respects max blended avg (disciplined inventory).
     paladin_stagger_symmetric_fallback_skip_first_leg_blend_cap: bool = False
-    # Causal ladder: alternate UP/DN first leg when balanced; pace pair starts; optional trailing dip filter.
-    # PALADIN v4 ladder pacing (default: gap=100s, no trailing, slip=0.02; hedge force 90s variant E).
+    # Causal ladder: alternate UP/DN first leg when balanced; pace time between completed pairs; optional trailing dip filter.
+    # PALADIN v4 ladder pacing (default: gap=100s after 2nd leg, no trailing, slip=0.02; hedge force 90s variant E).
     paladin_stagger_alternate_first_leg_when_balanced: bool = True
     paladin_min_elapsed_between_pair_starts: float | None = 100.0
     paladin_entry_trailing_min_low_seconds: int | None = None
@@ -216,7 +221,7 @@ class BotConfig:
     paladin_v7_cheap_other_margin: float = 0.04
     paladin_v7_cheap_pair_sum_max: float = 0.99
     paladin_v7_hedge_timeout_seconds: float = 90.0
-    paladin_v7_forced_hedge_max_book_sum: float = 1.04
+    paladin_v7_forced_hedge_max_book_sum: float = 1.30
     paladin_v7_refill_clip_fraction: float = 0.5
     paladin_v7_refill_max_pair_sum: float = 0.985
     paladin_v7_pair_cooldown_sec: float = 20.0
@@ -225,6 +230,14 @@ class BotConfig:
     paladin_v7_max_orders: int = 4
     paladin_v7_min_notional: float = 1.0
     paladin_v7_min_shares: float = 5.0
+    # Live: poll CLOB conditional balances vs SimState; debounce to tolerate API delay.
+    paladin_v7_reconcile_enabled: bool = True
+    paladin_v7_reconcile_interval_seconds: float = 5.0
+    paladin_v7_reconcile_share_tolerance: float = 0.35
+    paladin_v7_reconcile_confirm_reads: int = 2
+    paladin_v7_reconcile_flatten: bool = True
+    paladin_v7_reconcile_flatten_min_imbalance: float = 0.25
+    paladin_v7_reconcile_flatten_cooldown_seconds: float = 10.0
 
     @property
     def window_size_seconds(self) -> int:
@@ -391,6 +404,9 @@ class BotConfig:
             paladin_second_leg_book_improve_eps=max(
                 0.0, _env_float("BOT_PALADIN_SECOND_LEG_BOOK_IMPROVE_EPS", 0.013)
             ),
+            paladin_stagger_second_leg_require_live_mid_pair_sum=_env_bool(
+                "BOT_PALADIN_STAGGER_SECOND_LEG_REQUIRE_LIVE_MID_PAIR_SUM", False
+            ),
             paladin_max_blended_pair_avg_sum=(
                 None
                 if _env_float("BOT_PALADIN_MAX_BLENDED_PAIR_AVG_SUM", 0.97) <= 0
@@ -433,7 +449,7 @@ class BotConfig:
             paladin_v7_cheap_pair_sum_max=min(1.0, _env_float("BOT_PALADIN_V7_CHEAP_PAIR_SUM_MAX", 0.99)),
             paladin_v7_hedge_timeout_seconds=max(1.0, _env_float("BOT_PALADIN_V7_HEDGE_TIMEOUT_SEC", 90.0)),
             paladin_v7_forced_hedge_max_book_sum=min(
-                1.05, max(1.0, _env_float("BOT_PALADIN_V7_FORCED_HEDGE_SUM_MAX", 1.04))
+                1.50, max(1.0, _env_float("BOT_PALADIN_V7_FORCED_HEDGE_SUM_MAX", 1.30))
             ),
             paladin_v7_refill_clip_fraction=min(1.0, max(0.1, _env_float("BOT_PALADIN_V7_REFILL_CLIP_FRAC", 0.5))),
             paladin_v7_refill_max_pair_sum=min(1.0, _env_float("BOT_PALADIN_V7_REFILL_PAIR_SUM_MAX", 0.985)),
@@ -443,6 +459,21 @@ class BotConfig:
             paladin_v7_max_orders=max(0, _env_int("BOT_PALADIN_V7_MAX_ORDERS", 4)),
             paladin_v7_min_notional=max(0.01, _env_float("BOT_PALADIN_V7_MIN_NOTIONAL", 1.0)),
             paladin_v7_min_shares=max(1.0, _env_float("BOT_PALADIN_V7_MIN_SHARES", 5.0)),
+            paladin_v7_reconcile_enabled=_env_bool("BOT_PALADIN_V7_RECONCILE_ENABLED", True),
+            paladin_v7_reconcile_interval_seconds=max(
+                2.0, _env_float("BOT_PALADIN_V7_RECONCILE_INTERVAL_SEC", 5.0)
+            ),
+            paladin_v7_reconcile_share_tolerance=max(
+                0.05, _env_float("BOT_PALADIN_V7_RECONCILE_SHARE_TOL", 0.35)
+            ),
+            paladin_v7_reconcile_confirm_reads=max(1, _env_int("BOT_PALADIN_V7_RECONCILE_CONFIRM_READS", 2)),
+            paladin_v7_reconcile_flatten=_env_bool("BOT_PALADIN_V7_RECONCILE_FLATTEN", True),
+            paladin_v7_reconcile_flatten_min_imbalance=max(
+                0.05, _env_float("BOT_PALADIN_V7_RECONCILE_FLATTEN_MIN_IMB", 0.25)
+            ),
+            paladin_v7_reconcile_flatten_cooldown_seconds=max(
+                2.0, _env_float("BOT_PALADIN_V7_RECONCILE_FLATTEN_COOLDOWN_SEC", 10.0)
+            ),
         )
 
 

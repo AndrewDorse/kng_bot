@@ -43,25 +43,26 @@ PL = PaladinParams(
 )
 
 BASE_KW: dict = {
-    "budget_usdc": 80.0,
+    "budget_usdc": 1_000_000.0,
     "params": PL,
-    "pair_sum_max": 1.0,
+    "pair_sum_max": 0.97,
+    "pair_sum_max_on_forced_hedge": 1.0,
     "single_leg_max_px": 0.55,
     "pair_only": True,
     "stagger_pair_entry": True,
     "stagger_hedge_force_after_seconds": 45.0,
     "target_min_roi": 0.0,
     "cooldown_seconds": 0.0,
-    "dynamic_clip_cap": 12.0,
+    "dynamic_clip_cap": 20.0,
     "pair_size_pick": "max_feasible",
-    "max_shares_per_side": 10.0,
+    "max_shares_per_side": 20.0,
     "pair_sum_tighten_per_fill": 0.0,
     "pair_sum_min_floor": 0.90,
     "second_leg_book_improve_eps": 0.013,
     "max_blended_pair_avg_sum": 0.97,
     "pending_hedge_bypass_imbalance_shares": 10.0,
     "discipline_relax_after_forced_sec": 60.0,
-    "min_elapsed_for_flat_open": 24,
+    "min_elapsed_for_flat_open": 0,
     "stagger_winning_side_first_when_position": False,
     "stagger_symmetric_fallback_when_balanced": True,
     "stagger_symmetric_fallback_roi_discount": 0.03,
@@ -223,6 +224,10 @@ def main() -> int:
                 f"  {mean_p:.4f}  {label}  | total_pnl={tot_p:.2f} spend={tot_sp:.1f} "
                 f"+{pos}/{n} mean_trades={mean_tr:.1f}"
             )
+        print("########## AB: TOTAL_PNL_ALL_WINDOWS_USD (every arm, this window count) ##########")
+        for label, _mean_p, tot_p, _pos, _mean_sp, _tot_sp, _mean_tr in summary:
+            print(f"TOTAL_PNL_ALL_WINDOWS_USD={tot_p:.2f}\tn_windows={n}\tlabel={label}")
+        print("###################################################################################")
         print()
 
     return 0

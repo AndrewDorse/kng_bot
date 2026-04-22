@@ -31,7 +31,20 @@ class EarlyBirdStrategy:
 
         snapshot = engine._get_fullset_snapshot(contract, positions, open_orders)
         if snapshot is None:
-            LOGGER.info("[FULLSET WAIT] %s | no valid live prices yet", contract.slug)
+            LOGGER.info("[FULLSET WAIT] %s | snapshot unavailable", contract.slug)
+            return
+
+        prices_valid = bool(snapshot.get("entry_prices_valid"))
+        live_up = int(snapshot.get("live_up_int", 0))
+        live_down = int(snapshot.get("live_down_int", 0))
+        if not prices_valid:
+            if (live_up + live_down) > 0:
+                LOGGER.info(
+                    "[FULLSET WAIT] %s | no valid live prices for new entries | managing existing positions",
+                    contract.slug,
+                )
+            else:
+                LOGGER.info("[FULLSET WAIT] %s | no valid live prices yet", contract.slug)
             return
 
         if snapshot.get("window_stopped"):
@@ -42,8 +55,6 @@ class EarlyBirdStrategy:
         pending_down_orders = int(snapshot.get("pending_down_orders", 0))
         pending_total = pending_up_orders + pending_down_orders
 
-        live_up = int(snapshot.get("live_up_int", 0))
-        live_down = int(snapshot.get("live_down_int", 0))
         step_up = int(snapshot.get("live_step_up", 0))
         step_down = int(snapshot.get("live_step_down", 0))
 

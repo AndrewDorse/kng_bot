@@ -18,8 +18,8 @@ pip install -r requirements.txt
 
 4. **Set environment variables:**
 ```bash
-export POLY_PRIVATE_KEY="0xd74ef8655b4f8e66ed7e34e4900e7aa3b8b304fcf1bc5e2599e27e893ac8c871"
-export POLY_FUNDER="0x94a73570cd0df2da112fb55da7bb914b34efa18d"
+export POLY_PRIVATE_KEY="f"
+export POLY_FUNDER="f"
 export POLY_DRY_RUN=false  # Set to true for testing without real trades
 ```
 

@@ -2,13 +2,18 @@
 """
 Live PALADIN v4 pair-only loop: WebSocket mids + FAK buys (POST + optional GET fill confirm).
 
+Strategy goal: keep *held* pair cost low (post-fill avg_up + avg_down), not to chase the instantaneous
+book mid sum pm_up+pm_down (often near 1.0). Stagger second leg defaults to that discipline via
+BOT_PALADIN_MAX_BLENDED_PAIR_AVG_SUM + marginal ROI; optional legacy live-mid gate:
+BOT_PALADIN_STAGGER_SECOND_LEG_REQUIRE_LIVE_MID_PAIR_SUM.
+
 Core loop (each poll, default ~1s via BOT_POLL_INTERVAL_SECONDS):
   1) Resolve active 15m contract; refresh WS asset ids on window change.
   2) Read UP/DOWN mids (WS first, REST fallback).
   3) Build window elapsed time; apply pre-window / entry-delay / new-order-cutoff / end-game guards
      (pending hedge legs are still completed when we would otherwise block new risk).
   4) Run paladin_step on shared PALADIN rules: profit-lock (PnL+ROI vs paladin_sim_config.json),
-     staggered or symmetric pair adds, marginal ROI + pair-sum gates (with per-fill tighten + floor),
+     staggered or symmetric pair adds, marginal ROI + gates (with per-fill tighten + floor),
      hedge force timer, imbalance bypass and post-force relax (BOT_PALADIN_*), max shares/side cap.
   5) Execute marketable buys via PolymarketTrader (FAK); update sim state for next tick.
 
@@ -98,6 +103,13 @@ class PaladinLiveEngine:
             float(self.config.paladin_pair_sum_min_floor),
             self.config.paladin_pending_hedge_bypass_imbalance_shares,
             self.config.paladin_discipline_relax_after_forced_sec,
+        )
+        LOGGER.info(
+            "PALADIN 2nd_leg (live) | require_live_mid_pair_sum=%s | max_blended_pair_avg_sum=%s | "
+            "second_leg_book_improve_eps=%.4f",
+            self.config.paladin_stagger_second_leg_require_live_mid_pair_sum,
+            self.config.paladin_max_blended_pair_avg_sum,
+            float(self.config.paladin_second_leg_book_improve_eps),
         )
         while not self._stop:
             self._loop_once()
@@ -354,6 +366,7 @@ class PaladinLiveEngine:
             )
 
         pair_max = float(self.config.paladin_pair_sum_max)
+        pair_on_force = self.config.paladin_pair_sum_max_on_forced_hedge
         roi_tgt = float(self.config.paladin_target_min_roi)
         hb_sec = float(self.config.paladin_heartbeat_seconds)
         s = float(pm_u) + float(pm_d)
@@ -363,10 +376,43 @@ class PaladinLiveEngine:
             pend = runner.pending_second_leg
             pend_s = f"{pend[0]}×{pend[1]:.0f}" if pend is not None else "—"
             snap = runner.st.snapshot_metrics()
+            pend_phase = ""
+            if pend is not None and self.config.paladin_stagger_pair:
+                req_live = self.config.paladin_stagger_second_leg_require_live_mid_pair_sum
+                mb = self.config.paladin_max_blended_pair_avg_sum
+                mb_s = f"{float(mb):.3f}" if mb is not None else "off"
+                hf = self.config.paladin_stagger_hedge_force_after_seconds
+                if hf is not None and float(hf) > 0.0:
+                    ready_at = float(pend[2])
+                    deadline = ready_at + float(hf)
+                    if float(elapsed) + 1e-9 < deadline:
+                        force_in = max(0, int(round(deadline - float(elapsed))))
+                        if req_live:
+                            pend_phase = (
+                                f" | 2nd_leg_phase=STRICT(live_mid_sum<={pair_max:.3f}) "
+                                f"until_elapsed>={int(round(deadline))} "
+                                f"(~{force_in}s) then sum<={float(pair_on_force):.3f} if set"
+                                if pair_on_force is not None
+                                else f" | 2nd_leg_phase=STRICT(live_mid_sum<={pair_max:.3f}) until_elapsed>={int(round(deadline))} (~{force_in}s)"
+                            )
+                        else:
+                            pend_phase = (
+                                f" | 2nd_leg_phase=PRE_FORCE(~{force_in}s): post_fill_avg_sum<={mb_s}+roi "
+                                f"(no live mid sum gate)"
+                            )
+                    else:
+                        pend_phase = " | 2nd_leg_phase=FORCED_TIMER(sum cap relaxed)"
+                else:
+                    pend_phase = (
+                        " | 2nd_leg_phase=NO_TIMER(live_mid_sum+ROI; set HEDGE_FORCE_SEC>0)"
+                        if req_live
+                        else f" | 2nd_leg_phase=NO_TIMER(post_fill_avg_sum<={mb_s}+roi)"
+                    )
             LOGGER.info(
                 "PALADIN heartbeat | %s | elapsed=%ds left=%.0fs | mid_up=%.4f mid_dn=%.4f sum=%.4f "
-                "| stagger=%s 1st_leg_mid<=%.3f pending=%s | 2nd_leg: sum<=%.3f roi>=%.3f (~sum<=%.3f) "
-                "| spent=$%.2f | U=%.2f@%.3f D=%.2f@%.3f | pnl_if_up=$%.2f pnl_if_dn=$%.2f roi_u=%.4f roi_d=%.4f",
+                "| stagger=%s 1st_leg_mid<=%.3f pending=%s | pair_sum_max=%.3f live_2nd_mid_gate=%s "
+                "hedge_timer_sum<=%s roi>=%.3f (~sum<=%.3f) "
+                "| spent=$%.2f | U=%.2f@%.3f D=%.2f@%.3f | pnl_if_up=$%.2f pnl_if_dn=$%.2f roi_u=%.4f roi_d=%.4f%s",
                 slug,
                 elapsed,
                 secs_left,
@@ -377,6 +423,8 @@ class PaladinLiveEngine:
                 float(self.config.paladin_first_leg_max_px),
                 pend_s,
                 pair_max,
+                str(self.config.paladin_stagger_second_leg_require_live_mid_pair_sum).lower(),
+                f"{pair_on_force:.3f}" if pair_on_force is not None else "strict",
                 roi_tgt,
                 implied_second_leg_cap,
                 runner.st.spent_usdc,
@@ -388,6 +436,7 @@ class PaladinLiveEngine:
                 snap["pnl_if_down_usdc"],
                 snap["roi_up"],
                 snap["roi_dn"],
+                pend_phase,
             )
 
         stopped = paladin_step(
@@ -411,6 +460,7 @@ class PaladinLiveEngine:
             try_buy_fn=try_buy_fn,
             pair_sum_tighten_per_fill=float(self.config.paladin_pair_sum_tighten_per_fill),
             pair_sum_min_floor=float(self.config.paladin_pair_sum_min_floor),
+            pair_sum_max_on_forced_hedge=self.config.paladin_pair_sum_max_on_forced_hedge,
             pending_hedge_bypass_imbalance_shares=self.config.paladin_pending_hedge_bypass_imbalance_shares,
             discipline_relax_after_forced_sec=self.config.paladin_discipline_relax_after_forced_sec,
             second_leg_book_improve_eps=float(self.config.paladin_second_leg_book_improve_eps),
@@ -436,6 +486,9 @@ class PaladinLiveEngine:
                 self.config.paladin_entry_trailing_low_slippage
             ),
             second_leg_must_improve_leg_avg=False,
+            stagger_second_leg_require_live_mid_pair_sum=bool(
+                self.config.paladin_stagger_second_leg_require_live_mid_pair_sum
+            ),
         )
         if stopped:
             m = runner.st.snapshot_metrics()

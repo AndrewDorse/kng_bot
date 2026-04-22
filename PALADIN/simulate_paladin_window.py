@@ -356,15 +356,13 @@ def stagger_first_leg_candidates_winning_side_when_position(
     tie_eps: float = 1e-9,
 ) -> list[tuple[Side, float]]:
     """
-    Like stagger_first_leg_candidates, but once we already have inventory on either leg,
-    only open a new stagger *first* leg on the side with the higher mid (market "winner").
-    If that side is above first_leg_max_px, return [] (no new stagger first leg this second;
-    avoids opening the cheap "loser" leg first and then force-hedging at a bad price).
+    Stagger *first* leg on the higher-mid ("winning") side when it is <= first_leg_max_px.
+
+    When flat: lead with the favorite (if favorite is above the cap, return [] — no cheap-leg open).
+    On a tie, fall back to `base` (cheaper side first).
     """
     base = stagger_first_leg_candidates(pm_u, pm_d, first_leg_max_px)
     if not base:
-        return base
-    if size_up <= 1e-9 and size_down <= 1e-9:
         return base
     if pm_u > pm_d + tie_eps:
         win: Side = "up"
@@ -538,8 +536,7 @@ def balanced_symmetric_pair_start(
     sym_roi_floor: float,
 ) -> bool:
     """Start UP+DOWN pair with `first_side` filling first (causal symmetric fallback)."""
-    if pair_px > float(pair_sum_max) + 1e-9:
-        return False
+    # First leg does not wait for pair mid sum; second leg enforces pair_sum / hedge-force caps.
     sh_pair_fb = 0.0
     for cand in cands:
         if cand < min_clip - 1e-9:
@@ -628,6 +625,7 @@ def paladin_step(
     max_shares_per_side: float | None = None,
     pair_sum_tighten_per_fill: float = 0.0,
     pair_sum_min_floor: float = 0.88,
+    pair_sum_max_on_forced_hedge: float | None = 1.0,
     force_hedge_respects_effective_sum: bool = False,
     second_leg_book_improve_eps: float = 0.0,
     target_roi_per_fill: float = 0.0,
@@ -645,6 +643,7 @@ def paladin_step(
     entry_trailing_min_low_seconds: int | None = None,
     entry_trailing_low_slippage: float = 0.02,
     second_leg_must_improve_leg_avg: bool = False,
+    stagger_second_leg_require_live_mid_pair_sum: bool = False,
 ) -> bool:
     """Advance PALADIN by one simulated second. Returns True if profit-lock stopped trading."""
     st = runner.st
@@ -727,11 +726,22 @@ def paladin_step(
             and float(t) + 1e-9 >= time_force_deadline + float(drel)
         )
         use_relaxed_pending = bypass_imb or extra_relax
-        eff_sum_pending = float(pair_sum_max) if use_relaxed_pending else eff_sum_max
         book_eps_pending = 0.0 if use_relaxed_pending else second_leg_book_improve_eps
+        # Second leg: strict book sum until hedge-force timer; then allow up to pair_sum_max_on_forced_hedge
+        # (default 1.0) so the timer can complete the hedge when the book is wide.
+        sum_cap_2nd = float(eff_sum_max)
+        ph = pair_sum_max_on_forced_hedge
+        if force_hedge and ph is not None:
+            sum_cap_2nd = max(sum_cap_2nd, float(min(ph, 1.0)))
+        # Stagger 2nd leg: optional legacy gate on live pm_u+pm_d (often ~1.0). Default off — discipline is
+        # post-fill avg_up+avg_down (max_blended_pair_avg_sum) + marginal ROI, aligned with building low held cost.
+        if (
+            stagger_second_leg_require_live_mid_pair_sum
+            and stagger_pair_entry
+            and pm_u + pm_d > sum_cap_2nd + 1e-9
+        ):
+            return False
         if stagger_pair_entry and not force_hedge:
-            if pm_u + pm_d > eff_sum_pending + 1e-9:
-                return False
             if (
                 book_eps_pending > 0
                 and st.size_up > 1e-9
@@ -745,8 +755,6 @@ def paladin_step(
             if mr + 1e-9 < eff_target_roi:
                 return False
         if force_hedge:
-            # Old behavior: force skipped sum/ROI. When tightening, book-beat, or explicit flag is on,
-            # keep waiting for a cheaper second leg instead of buying a bad forced hedge.
             discipline_force = (
                 not use_relaxed_pending
                 and (
@@ -756,8 +764,6 @@ def paladin_step(
                 )
             )
             if discipline_force:
-                if pm_u + pm_d > eff_sum_max + 1e-9:
-                    return False
                 if (
                     second_leg_book_improve_eps > 0
                     and st.size_up > 1e-9
@@ -814,6 +820,15 @@ def paladin_step(
             if stagger_alternate_first_leg_when_balanced:
                 o = runner.alternate_next_first
                 runner.alternate_next_first = "down" if o == "up" else "up"
+            # Pace the *next* pair from completion, not from the prior first leg. Otherwise a long
+            # hedge (e.g. 90s force) consumes the whole min_elapsed_between_pair_starts budget and a new
+            # stagger_first can fire on the very next second (double clip / wrong-side stack).
+            if (
+                stagger_pair_entry
+                and min_elapsed_between_pair_starts is not None
+                and float(min_elapsed_between_pair_starts) > 0
+            ):
+                runner.last_stagger_pair_start_elapsed = float(t)
         return False
 
     if cooldown_seconds > 0 and float(t) < runner.last_buy_elapsed + cooldown_seconds - 1e-9:
@@ -862,38 +877,7 @@ def paladin_step(
             side_opts: list[tuple[Side, float]] = []
             sym_first: Side = "up"
 
-            if balanced and stagger_alternate_first_leg_when_balanced:
-                base = stagger_first_leg_candidates(pm_u, pm_d, single_leg_max_px)
-                side_opts = [(s, p) for s, p in base if s == runner.alternate_next_first]
-                sym_first = runner.alternate_next_first
-                if (
-                    not side_opts
-                    and stagger_symmetric_fallback_when_balanced
-                    and balanced_symmetric_pair_start(
-                        runner,
-                        st,
-                        buy=buy,
-                        t=t,
-                        pm_u=pm_u,
-                        pm_d=pm_d,
-                        first_side=sym_first,
-                        pair_px=pair_px,
-                        pair_sum_max=float(pair_sum_max),
-                        cands=cands,
-                        budget_usdc=budget_usdc,
-                        budget_left=budget_left,
-                        min_clip=min_clip,
-                        min_notional=min_notional,
-                        cooldown_seconds=cooldown_seconds,
-                        max_shares_per_side=max_shares_per_side,
-                        max_blended_pair_avg_sum=max_blended_pair_avg_sum,
-                        skip_first_leg_blend=stagger_symmetric_fallback_skip_first_leg_blend_cap,
-                        sym_roi_floor=sym_roi_floor,
-                    )
-                ):
-                    runner.last_stagger_pair_start_elapsed = float(t)
-                    return False
-            elif stagger_winning_side_first_when_position:
+            if stagger_winning_side_first_when_position:
                 side_opts = stagger_first_leg_candidates_winning_side_when_position(
                     pm_u,
                     pm_d,
@@ -915,7 +899,7 @@ def paladin_step(
                         pm_d=pm_d,
                         first_side="up",
                         pair_px=pair_px,
-                        pair_sum_max=float(pair_sum_max),
+                        pair_sum_max=float(eff_sum_max),
                         cands=cands,
                         budget_usdc=budget_usdc,
                         budget_left=budget_left,
@@ -932,11 +916,43 @@ def paladin_step(
                     return False
                 if not side_opts and not balanced:
                     side_opts = stagger_first_leg_candidates(pm_u, pm_d, single_leg_max_px)
+            elif balanced and stagger_alternate_first_leg_when_balanced:
+                base = stagger_first_leg_candidates(pm_u, pm_d, single_leg_max_px)
+                side_opts = [(s, p) for s, p in base if s == runner.alternate_next_first]
+                sym_first = runner.alternate_next_first
+                if (
+                    not side_opts
+                    and stagger_symmetric_fallback_when_balanced
+                    and balanced_symmetric_pair_start(
+                        runner,
+                        st,
+                        buy=buy,
+                        t=t,
+                        pm_u=pm_u,
+                        pm_d=pm_d,
+                        first_side=sym_first,
+                        pair_px=pair_px,
+                        pair_sum_max=float(eff_sum_max),
+                        cands=cands,
+                        budget_usdc=budget_usdc,
+                        budget_left=budget_left,
+                        min_clip=min_clip,
+                        min_notional=min_notional,
+                        cooldown_seconds=cooldown_seconds,
+                        max_shares_per_side=max_shares_per_side,
+                        max_blended_pair_avg_sum=max_blended_pair_avg_sum,
+                        skip_first_leg_blend=stagger_symmetric_fallback_skip_first_leg_blend_cap,
+                        sym_roi_floor=sym_roi_floor,
+                    )
+                ):
+                    runner.last_stagger_pair_start_elapsed = float(t)
+                    return False
             else:
                 side_opts = stagger_first_leg_candidates(pm_u, pm_d, single_leg_max_px)
 
             if not side_opts:
                 return False
+            # First stagger leg: do not require pm_u+pm_d <= pair cap (second leg does, or hedge timer).
             sh_use = 0.0
             for cand in cands:
                 if cand < min_clip - 1e-9:
@@ -1005,8 +1021,6 @@ def paladin_step(
                     float(t) + float(cooldown_seconds),
                 )
                 runner.last_buy_elapsed = float(t)
-                if balanced:
-                    runner.last_stagger_pair_start_elapsed = float(t)
             return False
 
         if pair_px > eff_sum_max + 1e-9:
@@ -1187,6 +1201,7 @@ def run_window(
     max_shares_per_side: float | None = None,
     pair_sum_tighten_per_fill: float = 0.0,
     pair_sum_min_floor: float = 0.88,
+    pair_sum_max_on_forced_hedge: float | None = 1.0,
     force_hedge_respects_effective_sum: bool = False,
     second_leg_book_improve_eps: float = 0.0,
     target_roi_per_fill: float = 0.0,
@@ -1204,6 +1219,7 @@ def run_window(
     entry_trailing_min_low_seconds: int | None = None,
     entry_trailing_low_slippage: float = 0.02,
     second_leg_must_improve_leg_avg: bool = False,
+    stagger_second_leg_require_live_mid_pair_sum: bool = False,
 ) -> SimState:
     runner = PaladinPairRunner()
     for t, (pm_u, pm_d) in enumerate(prices):
@@ -1227,6 +1243,7 @@ def run_window(
             max_shares_per_side=max_shares_per_side,
             pair_sum_tighten_per_fill=pair_sum_tighten_per_fill,
             pair_sum_min_floor=pair_sum_min_floor,
+            pair_sum_max_on_forced_hedge=pair_sum_max_on_forced_hedge,
             force_hedge_respects_effective_sum=force_hedge_respects_effective_sum,
             second_leg_book_improve_eps=second_leg_book_improve_eps,
             target_roi_per_fill=target_roi_per_fill,
@@ -1244,6 +1261,7 @@ def run_window(
             entry_trailing_min_low_seconds=entry_trailing_min_low_seconds,
             entry_trailing_low_slippage=entry_trailing_low_slippage,
             second_leg_must_improve_leg_avg=second_leg_must_improve_leg_avg,
+            stagger_second_leg_require_live_mid_pair_sum=stagger_second_leg_require_live_mid_pair_sum,
         ):
             break
     return runner.st
@@ -1398,6 +1416,12 @@ def main() -> int:
         default=0.982,
         help="Max pm_up+pm_down for a pair add. Use ~0.99 with --pair-only for more fills.",
     )
+    ap.add_argument(
+        "--pair-sum-max-on-force",
+        type=float,
+        default=1.0,
+        help="After --stagger-hedge-force-sec: max pm_up+pm_down for 2nd leg (default 1.0). <=0 uses strict cap only.",
+    )
     ap.add_argument("--single-max", type=float, default=0.54)
     ap.add_argument(
         "--pair-only",
@@ -1413,7 +1437,8 @@ def main() -> int:
         "--stagger-hedge-force-sec",
         type=float,
         default=-1.0,
-        help="Sim seconds after hedge-ready to force 2nd leg (skip ROI+sum). -1=auto 45s if --stagger-pair else off; 0=off.",
+        help="Seconds after hedge-ready: force 2nd leg (skips ROI gate; pair-sum relaxes to --pair-sum-max-on-force). "
+        "-1=auto 45s if --stagger-pair else off; 0=off.",
     )
     ap.add_argument(
         "--max-shares-per-side",
@@ -1565,7 +1590,7 @@ def main() -> int:
         "--min-elapsed-between-pair-starts",
         type=float,
         default=-1.0,
-        help="When balanced, wait at least this many seconds after starting a pair before starting the next (causal pacing). -1=off.",
+        help="When balanced, wait at least this many seconds after completing a stagger pair (2nd leg fill) before the next stagger_first. -1=off.",
     )
     ap.add_argument(
         "--entry-trailing-min-low-seconds",
@@ -1578,6 +1603,12 @@ def main() -> int:
         type=float,
         default=0.02,
         help="Slippage added to trailing min for --entry-trailing-min-low-seconds (default 0.02).",
+    )
+    ap.add_argument(
+        "--stagger-second-leg-require-live-mid-pair-sum",
+        action="store_true",
+        help="Legacy stagger 2nd leg: require pm_up+pm_down <= pair cap until hedge-force. "
+        "Default off — gate on post-fill avg_up+avg_down (see --max-blended-pair-avg-sum) + ROI.",
     )
     args = ap.parse_args()
 
@@ -1627,6 +1658,11 @@ def main() -> int:
         max_shares_per_side=mx_sh,
         pair_sum_tighten_per_fill=float(args.pair_sum_tighten_per_fill),
         pair_sum_min_floor=float(args.pair_sum_min_floor),
+        pair_sum_max_on_forced_hedge=(
+            None
+            if float(args.pair_sum_max_on_force) <= 0
+            else min(1.0, float(args.pair_sum_max_on_force))
+        ),
         force_hedge_respects_effective_sum=bool(args.force_hedge_respect_effective_sum),
         second_leg_book_improve_eps=float(args.second_leg_book_improve_eps),
         target_roi_per_fill=float(args.target_roi_per_fill),
@@ -1669,6 +1705,9 @@ def main() -> int:
             else int(args.entry_trailing_min_low_seconds)
         ),
         entry_trailing_low_slippage=float(args.entry_trailing_low_slippage),
+        stagger_second_leg_require_live_mid_pair_sum=bool(
+            args.stagger_second_leg_require_live_mid_pair_sum
+        ),
     )
 
     slug = window_slug_from_prices_csv(args.prices)
@@ -1684,6 +1723,9 @@ def main() -> int:
         "usd_profit_lock_disabled": args.no_usd_profit_lock,
         "pair_only": args.pair_only,
         "stagger_pair_entry": args.stagger_pair,
+        "stagger_second_leg_require_live_mid_pair_sum": bool(
+            args.stagger_second_leg_require_live_mid_pair_sum
+        ),
         "target_min_roi": args.target_min_roi,
         "cooldown_seconds": args.cooldown_seconds,
         "dynamic_clip_max": args.dynamic_clip_max,
