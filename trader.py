@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""Polymarket CLOB API wrapper — order placement, cancellation, balances."""
+
+from __future__ import annotations
+
+import threading
+import time
+from functools import wraps
+from typing import Any
+
+import requests
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import (
+    AssetType,
+    BalanceAllowanceParams,
+    OpenOrderParams,
+    OrderArgs,
+    OrderType,
+)
+
+from config import (
+    HOST, CHAIN_ID, BUY, SELL, LOGGER,
+    BotConfig, TokenMarket, parse_balance_response,
+)
+
+
+def _retry(max_attempts=2, backoff_base=0.5, retryable=(requests.RequestException,)):
+    """Decorator: retry on transient network errors with exponential backoff."""
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except retryable as exc:
+                    last_exc = exc
+                    if attempt < max_attempts:
+                        wait = backoff_base * (2 ** (attempt - 1))
+                        LOGGER.debug(
+                            "Retry %d/%d for %s after %.1fs: %s",
+                            attempt, max_attempts, fn.__name__, wait, exc,
+                        )
+                        time.sleep(wait)
+            raise last_exc
+        return wrapper
+    return decorator
+
+
+class PolymarketTrader:
+    """Handles all CLOB API interactions: credentials, orders, balances."""
+
+    def __init__(self, config: BotConfig):
+        self.config = config
+
+        # --- Build CLOB client ---
+        self.client = ClobClient(
+            HOST,
+            chain_id=CHAIN_ID,
+            key=config.private_key,
+            signature_type=config.signature_type,
+            funder=config.funder,
+        )
+
+        # --- API credentials (relayer keys or derive) ---
+        if config.relayer_api_key:
+            from py_clob_client.clob_types import ApiCreds
+            creds = ApiCreds(
+                api_key=config.relayer_api_key,
+                api_secret=config.relayer_secret or "",
+                api_passphrase=config.relayer_passphrase or "",
+            )
+        else:
+            creds = self.client.create_or_derive_api_creds()
+        self.client.set_api_creds(creds)
+        LOGGER.info("API credentials set for funder: %s", config.funder)
+
+        # One taker pipeline at a time: FAK POST + confirm + retries must finish (or raise)
+        # before another marketable order is sent — avoids overlap when the CLOB is slow.
+        self._taker_order_lock = threading.Lock()
+
+        # --- Token spending allowances (required before first trade) ---
+        self._setup_allowances()
+
+    # ------------------------------------------------------------------
+    # Initialization helpers
+    # ------------------------------------------------------------------
+
+    def _setup_allowances(self) -> None:
+        """Sync USDC collateral allowance with the CLOB (newer SDK) or legacy on-chain setup."""
+        if hasattr(self.client, "set_allowances"):
+            try:
+                self.client.set_allowances(signature_type=self.config.signature_type)
+                LOGGER.info("Allowances set successfully (set_allowances)")
+                return
+            except Exception as exc:
+                LOGGER.warning("set_allowances failed, trying API sync: %s", exc)
+        try:
+            self.client.update_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self.config.signature_type,
+                )
+            )
+            LOGGER.info("Collateral balance/allowance synced (update_balance_allowance)")
+        except Exception as exc:
+            LOGGER.warning("Allowance sync issue (may already be set on-chain): %s", exc)
+
+    # ------------------------------------------------------------------
+    # Balance checks
+    # ------------------------------------------------------------------
+
+    def wallet_balance_usdc(self) -> float:
+        """Return available USDC balance as a float."""
+        try:
+            resp = self.client.get_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self.config.signature_type,
+                )
+            )
+            return parse_balance_response(resp)
+        except Exception as e:
+            LOGGER.debug("Balance fetch error: %s", e)
+            return 0.0
+
+    def token_balance(self, token_id: str) -> float:
+        """Return how many shares of a specific conditional token we hold."""
+        try:
+            resp = self.client.get_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                    signature_type=self.config.signature_type,
+                )
+            )
+            return parse_balance_response(resp)
+        except Exception:
+            return 0.0
+
+    def token_balance_allowance_refreshed(self, token_id: str) -> float:
+        """Sync conditional allowance with CLOB then read balance (API can lag; use for reconciliation)."""
+        try:
+            self.client.update_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                    signature_type=self.config.signature_type,
+                )
+            )
+        except Exception as exc:
+            LOGGER.debug("update_balance_allowance conditional %s: %s", token_id[:16], exc)
+        return self.token_balance(token_id)
+
+    def has_sufficient_balance(self, required_usdc: float) -> bool:
+        """Check if wallet has enough USDC for planned orders.
+        Returns True if balance >= required, else logs warning and returns False."""
+        balance = self.wallet_balance_usdc()
+        if balance < required_usdc:
+            LOGGER.warning(
+                "Insufficient balance: have $%.2f, need $%.2f",
+                balance, required_usdc,
+            )
+            return False
+        LOGGER.debug("Balance OK: have $%.2f, need $%.2f", balance, required_usdc)
+        return True
+
+    # ------------------------------------------------------------------
+    # Order placement
+    # ------------------------------------------------------------------
+
+    @_retry()
+    def place_limit_buy(
+        self,
+        token: TokenMarket,
+        price: float,
+        size: int,
+        *,
+        fee_rate_bps: int | None = None,
+        post_only: bool = False,
+    ) -> dict[str, Any]:
+        """Place a GTC limit buy order. Returns the CLOB response dict.
+
+        Args:
+            token: TokenMarket with .token_id
+            price: limit price (0.01–0.99)
+            size:  number of shares (integer)
+        """
+        order_kwargs: dict[str, Any] = {
+            "token_id": token.token_id,
+            "price": round(price, 2),
+            "size": float(size),
+            "side": BUY,
+        }
+        if fee_rate_bps is not None:
+            order_kwargs["fee_rate_bps"] = fee_rate_bps
+        order = OrderArgs(**order_kwargs)
+        signed = self.client.create_order(order)
+        return self.client.post_order(signed, OrderType.GTC, post_only=post_only)
+
+    def place_marketable_buy(
+        self,
+        token: TokenMarket,
+        price: float,
+        size: int,
+        *,
+        fee_rate_bps: int | None = None,
+    ) -> dict[str, Any]:
+        """Place an aggressive buy intended to fill immediately."""
+        with self._taker_order_lock:
+            return self._place_marketable_buy_impl(
+                token, price, size, fee_rate_bps=fee_rate_bps
+            )
+
+    @_retry()
+    def _place_marketable_buy_impl(
+        self,
+        token: TokenMarket,
+        price: float,
+        size: int,
+        *,
+        fee_rate_bps: int | None = None,
+    ) -> dict[str, Any]:
+        order_kwargs: dict[str, Any] = {
+            "token_id": token.token_id,
+            "price": round(price, 2),
+            "size": float(size),
+            "side": BUY,
+        }
+        if fee_rate_bps is not None:
+            order_kwargs["fee_rate_bps"] = fee_rate_bps
+        order = OrderArgs(**order_kwargs)
+        signed = self.client.create_order(order)
+        return self.client.post_order(signed, OrderType.FAK)
+
+    def place_marketable_buy_with_result(
+        self,
+        token: TokenMarket,
+        price: float,
+        size: int,
+        *,
+        confirm_get_order: bool = True,
+        fee_rate_bps: int | None = None,
+    ) -> Any:
+        """Submit FAK buy; parse POST body and optionally confirm fill via GET /order."""
+        with self._taker_order_lock:
+            return self._place_marketable_buy_with_result_impl(
+                token,
+                price,
+                size,
+                confirm_get_order=confirm_get_order,
+                fee_rate_bps=fee_rate_bps,
+            )
+
+    @_retry()
+    def _place_marketable_buy_with_result_impl(
+        self,
+        token: TokenMarket,
+        price: float,
+        size: int,
+        *,
+        confirm_get_order: bool = True,
+        fee_rate_bps: int | None = None,
+    ) -> Any:
+        from clob_fak import fak_buy_with_confirm
+
+        order_kwargs: dict[str, Any] = {
+            "token_id": token.token_id,
+            "price": round(price, 2),
+            "size": float(size),
+            "side": BUY,
+        }
+        if fee_rate_bps is not None:
+            order_kwargs["fee_rate_bps"] = fee_rate_bps
+        order = OrderArgs(**order_kwargs)
+        signed = self.client.create_order(order)
+        raw = self.client.post_order(signed, OrderType.FAK)
+        return fak_buy_with_confirm(
+            self.client.get_order,
+            raw,
+            requested_shares=size,
+            limit_price=float(price),
+            confirm=confirm_get_order,
+        )
+
+    @_retry()
+    def place_limit_sell(
+        self, token: TokenMarket, price: float, size: int
+    ) -> dict[str, Any]:
+        """Place a GTC limit sell order (for exiting held positions).
+
+        Args:
+            token: TokenMarket with .token_id
+            price: limit price (0.01–0.99)
+            size:  number of shares (integer)
+        """
+        order = OrderArgs(
+            token_id=token.token_id,
+            price=round(price, 2),
+            size=float(size),
+            side=SELL,
+        )
+        signed = self.client.create_order(order)
+        return self.client.post_order(signed, OrderType.GTC)
+
+    def place_marketable_sell(
+        self, token: TokenMarket, price: float, size: float
+    ) -> dict[str, Any]:
+        """Place an aggressive sell intended to fill immediately.
+
+        Uses FAK so small cleanup leftovers do not remain resting on the book.
+        """
+        with self._taker_order_lock:
+            return self._place_marketable_sell_impl(token, price, size)
+
+    @_retry()
+    def _place_marketable_sell_impl(
+        self, token: TokenMarket, price: float, size: float
+    ) -> dict[str, Any]:
+        order = OrderArgs(
+            token_id=token.token_id,
+            price=round(price, 2),
+            size=float(size),
+            side=SELL,
+        )
+        signed = self.client.create_order(order)
+        return self.client.post_order(signed, OrderType.FAK)
+
+    # ------------------------------------------------------------------
+    # Order management
+    # ------------------------------------------------------------------
+
+    def get_open_orders(self) -> list[dict[str, Any]]:
+        """Fetch all currently open orders for this account."""
+        try:
+            return self.client.get_orders(OpenOrderParams())
+        except Exception:
+            return []
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single order by ID. Returns True on success."""
+        try:
+            self.client.cancel(order_id)
+            return True
+        except Exception as exc:
+            LOGGER.debug("Cancel failed %s: %s", order_id, exc)
+            return False
+
+    def cancel_all_orders(self, open_orders: list[dict[str, Any]] | None = None) -> int:
+        """Cancel all open orders. If open_orders not provided, fetches them first.
+        Returns count of successfully cancelled orders."""
+        if open_orders is None:
+            open_orders = self.get_open_orders()
+        cancelled = 0
+        for order in open_orders:
+            oid = str(order.get("id") or order.get("orderID") or "")
+            if oid and self.cancel_order(oid):
+                cancelled += 1
+        if cancelled:
+            LOGGER.info("Cancelled %d/%d open orders", cancelled, len(open_orders))
+        return cancelled
+
+    # ------------------------------------------------------------------
+    # Market data — live market price
+    # ------------------------------------------------------------------
+
+    @_retry()
+    def get_market_price(self, token_id: str) -> float | None:
+        """Get current market price for a token from the Polymarket CLOB API.
+
+        Uses the /price endpoint which returns the actual trading price,
+        not the order book ask (which can be distorted by low liquidity).
+
+        Returns float price or None on failure."""
+        try:
+            resp = requests.get(
+                f"{HOST}/price",
+                params={"token_id": token_id, "side": "buy"},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            price = float(data.get("price", 0))
+            if price > 0:
+                LOGGER.debug("Market price for %s…: %.4f", token_id[:16], price)
+                return price
+            return None
+        except Exception as exc:
+            LOGGER.debug("Market price fetch failed for %s: %s", token_id[:16], exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Market data — order book normalization
+    # ------------------------------------------------------------------
+
+    def _normalize_book_entries(self, entries: Any) -> list[dict[str, str]]:
+        """Convert order book entries to list of {"price": str, "size": str} dicts.
+
+        The py_clob_client library may return:
+          - A list of dicts (older versions)
+          - A list of objects with .price/.size attributes (newer versions)
+          - None or empty
+
+        This normalizer handles all cases so downstream code always works."""
+        if not entries:
+            return []
+
+        normalized = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                normalized.append({
+                    "price": str(entry.get("price", "0")),
+                    "size": str(entry.get("size", "0")),
+                })
+            else:
+                # Object with attributes (OrderSummary, etc.)
+                normalized.append({
+                    "price": str(getattr(entry, "price", "0")),
+                    "size": str(getattr(entry, "size", "0")),
+                })
+        return normalized
+
+    @_retry()
+    def get_order_book(self, token_id: str) -> dict[str, Any]:
+        """Get full order book for a token, normalized to dict format.
+
+        Always returns:
+            {"bids": [{"price": "0.46", "size": "100"}, ...],
+             "asks": [{"price": "0.54", "size": "50"}, ...]}
+
+        Handles both dict and object responses from py_clob_client.
+        Returns empty dict on failure."""
+        try:
+            book = self.client.get_order_book(token_id)
+
+            # --- Already a dict (older library versions) ---
+            if isinstance(book, dict):
+                result = {
+                    "bids": self._normalize_book_entries(book.get("bids")),
+                    "asks": self._normalize_book_entries(book.get("asks")),
+                }
+                LOGGER.debug(
+                    "Book (dict) for %s…: %d bids, %d asks",
+                    token_id[:16], len(result["bids"]), len(result["asks"]),
+                )
+                return result
+
+            # --- Object with attributes (newer library versions) ---
+            raw_bids = getattr(book, "bids", None) or []
+            raw_asks = getattr(book, "asks", None) or []
+
+            result = {
+                "bids": self._normalize_book_entries(raw_bids),
+                "asks": self._normalize_book_entries(raw_asks),
+            }
+
+            LOGGER.debug(
+                "Book (obj) for %s…: %d bids, %d asks",
+                token_id[:16], len(result["bids"]), len(result["asks"]),
+            )
+            return result
+
+        except Exception as exc:
+            LOGGER.debug("Order book fetch failed for %s: %s", token_id[:16], exc)
+            return {}
+
+    # ------------------------------------------------------------------
+    # Derived market data helpers
+    # ------------------------------------------------------------------
+
+    def get_best_ask(self, token_id: str) -> float | None:
+        """Get lowest ask price — what it costs to buy right now.
+
+        Used by hedge trigger logic: when best_ask >= hedge_price,
+        we execute the hedge buy immediately."""
+        try:
+            book = self.get_order_book(token_id)
+            asks = book.get("asks") or []
+            if asks:
+                price = float(asks[0].get("price", 0))
+                return price if price > 0 else None
+            return None
+        except Exception:
+            return None
+
+    def get_best_bid(self, token_id: str) -> float | None:
+        """Get highest bid price — what we'd receive selling right now.
+
+        Useful for assessing liquidation value of unpaired positions."""
+        try:
+            book = self.get_order_book(token_id)
+            bids = book.get("bids") or []
+            if bids:
+                price = float(bids[0].get("price", 0))
+                return price if price > 0 else None
+            return None
+        except Exception:
+            return None
+
+    def get_midpoint(self, token_id: str) -> float | None:
+        """Get current midpoint price for a token from the orderbook.
+        Returns None if orderbook is empty or unavailable."""
+        try:
+            book = self.get_order_book(token_id)
+            bids = book.get("bids") or []
+            asks = book.get("asks") or []
+            if not bids or not asks:
+                return None
+            best_bid = float(bids[0].get("price", 0))
+            best_ask = float(asks[0].get("price", 0))
+            if best_bid <= 0 or best_ask <= 0:
+                return None
+            return (best_bid + best_ask) / 2.0
+        except Exception:
+            return None
+
+    def get_spread(self, token_id: str) -> dict[str, float | None]:
+        """Get best bid, best ask, and spread for a token.
+        Useful for deciding whether cheap orders are likely to fill."""
+        result: dict[str, float | None] = {
+            "best_bid": None, "best_ask": None, "spread": None,
+        }
+        try:
+            book = self.get_order_book(token_id)
+            bids = book.get("bids") or []
+            asks = book.get("asks") or []
+            if bids:
+                result["best_bid"] = float(bids[0].get("price", 0))
+            if asks:
+                result["best_ask"] = float(asks[0].get("price", 0))
+            if result["best_bid"] and result["best_ask"]:
+                result["spread"] = result["best_ask"] - result["best_bid"]
+        except Exception:
+            pass
+        return result
