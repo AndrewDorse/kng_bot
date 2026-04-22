@@ -21,6 +21,7 @@ COPY market_locator.py /app/market_locator.py
 COPY trader.py /app/trader.py
 COPY signal_analyzer.py /app/signal_analyzer.py
 COPY http_session.py /app/http_session.py
+COPY clob_fak.py /app/clob_fak.py
 COPY paladin_live_engine.py /app/paladin_live_engine.py
 COPY paladin_v7_live_engine.py /app/paladin_v7_live_engine.py
 COPY polymarket_ws.py /app/polymarket_ws.py
