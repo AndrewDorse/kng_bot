@@ -39,7 +39,10 @@ $rootFiles = @(
     "http_session.py",
     "polymarket_ws.py",
     "clob_fak.py",
-    "paladin_v7_live_engine.py"
+    "paladin_v7_live_engine.py",
+    "btc15_redeem_engine.py",
+    "paladin_live_engine.py",
+    "signal_analyzer.py"
 )
 
 foreach ($f in $rootFiles) {
