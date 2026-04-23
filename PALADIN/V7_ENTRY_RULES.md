@@ -24,7 +24,8 @@ Age since first leg `t0` ≥ `cheap_hedge_min_delay_sec` **and**
 `avg_first + opposite_mid + cheap_hedge_slip_buffer ≤` non‑forced cap (`cheap_pair_*` / `_nonforced_pair_cap`).
 
 **Forced hedge (`v7_hedge_forced`):**  
-Age ≥ `hedge_timeout_seconds` (default 90s). **Not** blocked by `pm_up + pm_down`.
+Age ≥ `hedge_timeout_seconds` (default 90s).  
+*(Older builds also required `pm_u + pm_d` — sum of both outcome mids — to be ≤ `forced_hedge_max_book_sum`; that could block every forced hedge when the book was “tight” in the wrong way. Current code does **not** use that sum as a gate; only the timeout matters.)*
 
 **Label:** If both cheap and forced are true, cheap wins for the `reason` string.
 
