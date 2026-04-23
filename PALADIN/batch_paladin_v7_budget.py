@@ -7,6 +7,10 @@ Param sources:
   - ``bot_config``: ``BotConfig()`` dataclass defaults (matches live engine knob mapping).
 
 Reports aggregate settled PnL (last-mid proxy winner) for requested pool sizes.
+
+Examples::
+
+  python PALADIN/batch_paladin_v7_budget.py --param-source bot_config --all-windows --budget-usdc 80 --max-shares-per-side 10 --report exports/out.txt
 """
 
 from __future__ import annotations
@@ -91,17 +95,17 @@ def pm_series_from_ticks(ticks: list) -> list[tuple[float, float]]:
     return [(float(t.pm_u), float(t.pm_d)) for t in ticks]
 
 
-def _minimal_bot_config_for_v7_defaults() -> BotConfig:
+def _minimal_bot_config_for_v7_defaults(*, strategy_budget_cap_usdc: float = 10.0) -> BotConfig:
     """``BotConfig`` requires key fields; sim reads v7 knobs aligned with ``BotConfig.from_env()`` for v7.
 
-    Plain ``BotConfig()`` would leave ``strategy_budget_cap_usdc`` at the dataclass default (80);
-    live v7 uses ``10`` when ``BOT_STRATEGY_BUDGET_CAP_USDC`` is unset (see ``config.py``).
+    Default ``10`` matches ``BotConfig.from_env()`` when ``BOT_STRATEGY_BUDGET_CAP_USDC`` is unset for
+    ``paladin_v7``. Override with ``--budget-usdc`` (e.g. ``80`` to match a typical live ``.env``).
     """
     return BotConfig(
         private_key="0x" + "1" * 64,
         funder="0x" + "2" * 40,
         strategy_mode="paladin_v7",
-        strategy_budget_cap_usdc=10.0,
+        strategy_budget_cap_usdc=float(strategy_budget_cap_usdc),
     )
 
 
@@ -332,6 +336,12 @@ def main() -> int:
         default="",
         help="Printed in the report header for A/B identification.",
     )
+    ap.add_argument(
+        "--budget-usdc",
+        type=float,
+        default=10.0,
+        help="Sim strategy cap (BOT_STRATEGY_BUDGET_CAP_USDC). Use 80 to mirror common live KNG3 .env.",
+    )
     args = ap.parse_args()
 
     pools = tuple(int(x.strip()) for x in args.pools.split(",") if x.strip())
@@ -355,7 +365,9 @@ def main() -> int:
         )
 
     if args.param_source == "bot_config":
-        params = paladin_v7_params_from_bot_config(_minimal_bot_config_for_v7_defaults())
+        params = paladin_v7_params_from_bot_config(
+            _minimal_bot_config_for_v7_defaults(strategy_budget_cap_usdc=float(args.budget_usdc))
+        )
     else:
         params = V7_SMALL_BUDGET_4ORDERS
     if args.max_shares_per_side is not None:
