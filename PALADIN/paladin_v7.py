@@ -3,7 +3,8 @@
 PALADIN v7 (sim): Binance per-second volume spike + BTC price impulse → Polymarket legs.
 
 1) **First leg** when (rolling Binance base-volume vs lookback mean) spikes *and* BTC price moves
-   in the same second; side = momentum (price up → UP token, down → DOWN token).
+   in the same second; side = momentum (price up → UP token, down → DOWN token). Gated by
+   ``first_leg_max_pm`` only — **not** by ``_nonforced_pair_cap`` (that cap is for hedge/refill only).
 2) **Second leg** (hedge) on the opposite outcome token: prefer a *cheap* fill when
    **first-leg VWAP + current opposite mid (+ slip buffer)** <= ``_nonforced_pair_cap`` (the minimum of
    ``cheap_pair_sum_max``, ``1 - cheap_other_margin``, and ``cheap_pair_avg_sum_nonforced_max``, default **0.96**).
@@ -58,8 +59,8 @@ class PaladinV7Params:
     first_leg_max_pm: float = 0.62
     cheap_other_margin: float = 0.04
     cheap_pair_sum_max: float = 0.99
-    # Hard ceiling (held first-leg VWAP + opposite mid + slip, and first-leg+opposite+slip, and refill mids)
-    # until ``v7_hedge_forced``. Looser ``cheap_pair_sum_max`` / margin cannot exceed this for non-forced paths.
+    # Hard ceiling for cheap *hedge* (held VWAP + opposite mid + slip) and *refill* book-sum gate until forced.
+    # Spike *first* leg is gated by ``first_leg_max_pm`` only, not this field.
     cheap_pair_avg_sum_nonforced_max: float = 0.96
     # Live FAK often walks the book above the WS mid used for gating; require headroom so
     # avg_first + (mid_opposite + buffer) <= cheap cap (avoids approving hedges that fill >1 pair avg).
@@ -185,7 +186,7 @@ def _price_jump(ticks: list[WindowTick], t: int, p: PaladinV7Params) -> bool:
 
 
 def _nonforced_pair_cap(p: PaladinV7Params) -> float:
-    """Max pair-style sum (per side mid / held VWAP + opposite) for any path except forced hedge."""
+    """Max pair-style sum for cheap *hedge* and *refill* gates (not Binance spike first leg). Forced hedge ignores."""
     base = min(float(p.cheap_pair_sum_max), 1.0 - float(p.cheap_other_margin))
     return min(base, float(p.cheap_pair_avg_sum_nonforced_max))
 
@@ -344,12 +345,6 @@ def paladin_v7_step(
 
     px_1 = pm_u if mom == "up" else pm_d
     if px_1 + 1e-9 > float(p.first_leg_max_pm):
-        return
-    opp_mid = pm_d if mom == "up" else pm_u
-    slip0 = max(0.0, float(p.cheap_hedge_slip_buffer))
-    cap0 = _nonforced_pair_cap(p)
-    # Do not open spike first leg unless a same-tick cheap hedge *could* exist under the non-forced cap.
-    if float(px_1) + float(opp_mid) + slip0 > cap0 + 1e-9:
         return
 
     sh1 = _clamp_shares(st, mom, p.clip_shares, p.max_shares_per_side, min_sh)

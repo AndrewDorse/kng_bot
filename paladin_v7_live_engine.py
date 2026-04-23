@@ -769,13 +769,10 @@ class PaladinV7LiveEngine:
             px_eff = float(px)
             mh = float(self.config.paladin_v7_cheap_pair_avg_sum_nonforced_max)
             slip = float(self.config.paladin_v7_cheap_hedge_slip_buffer)
-            # Tighten FAK anchor so fills cannot walk far past the non-forced pair cap (forced hedge uncapped here).
+            # Non-forced pair cap applies to cheap *hedge* and *refill* FAK anchors only — not first leg opens.
             if reason == "v7_hedge_cheap" and runner.pending_second is not None:
                 avg_first = float(runner.pending_second[2])
                 px_eff = min(px_eff, max(0.01, mh - avg_first - slip - 1e-4))
-            elif reason == "v7_first_binance_spike":
-                opp = float(pm_d) if side == "up" else float(pm_u)
-                px_eff = min(px_eff, max(0.01, mh - opp - slip - 1e-4))
             elif reason == "v7_refill_up":
                 px_eff = min(px_eff, max(0.01, mh - float(pm_d) - slip - 1e-4))
             elif reason == "v7_refill_dn":

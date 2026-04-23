@@ -220,7 +220,7 @@ class BotConfig:
     paladin_v7_first_leg_max_pm: float = 0.62
     paladin_v7_cheap_other_margin: float = 0.04
     paladin_v7_cheap_pair_sum_max: float = 0.99
-    # Hard max pair-style sum (mid/VWAP + opposite + slip) for first leg, cheap hedge, refill — not forced hedge.
+    # Hard max pair-style sum for *cheap hedge* + *refill* (held/opposite + slip, book mids); not spike first leg.
     paladin_v7_cheap_pair_avg_sum_nonforced_max: float = 0.96
     # Hedge cheap-gate uses opposite_mid + this buffer vs cap (FAK VWAP often > mid).
     paladin_v7_cheap_hedge_slip_buffer: float = 0.012
