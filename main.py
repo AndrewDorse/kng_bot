@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import sys
 
-from btc15_redeem_engine import Btc15RedeemEngine
 from config import BotConfig, BotConfigError, LOGGER, configure_logging
 from market_locator import GammaMarketLocator
-from paladin_live_engine import PaladinLiveEngine
-from paladin_v7_live_engine import PaladinV7LiveEngine
-from signal_analyzer import SignalAnalyzer
 from trader import PolymarketTrader
+
+# Heavy / optional engines: import inside the strategy branch so a minimal Docker image
+# (PALADIN v7 only, no btc15_redeem_engine.py on disk) still starts when BOT_STRATEGY_MODE=paladin_v7.
 
 
 def main() -> int:
@@ -124,6 +123,8 @@ def main() -> int:
     trader = PolymarketTrader(config)
 
     if config.strategy_mode == "paladin_v7":
+        from paladin_v7_live_engine import PaladinV7LiveEngine  # noqa: PLC0415
+
         if config.dry_run:
             LOGGER.warning("PALADIN v7: POLY_DRY_RUN=true — paper only (no CLOB orders).")
         else:
@@ -132,6 +133,8 @@ def main() -> int:
         return 0
 
     if config.strategy_mode == "paladin":
+        from paladin_live_engine import PaladinLiveEngine  # noqa: PLC0415
+
         if config.dry_run:
             LOGGER.warning("PALADIN: POLY_DRY_RUN=true — paper only (no CLOB orders).")
         else:
@@ -139,10 +142,14 @@ def main() -> int:
         PaladinLiveEngine(config, locator, trader).run()
         return 0
 
+    from btc15_redeem_engine import Btc15RedeemEngine  # noqa: PLC0415
+
     engine = Btc15RedeemEngine(config, locator, trader)
 
-    signals: SignalAnalyzer | None = None
+    signals = None
     if config.strategy_mode == "signal_only":
+        from signal_analyzer import SignalAnalyzer  # noqa: PLC0415
+
         signals = SignalAnalyzer(signal_preset=config.signal_preset)
         signals.attach(engine)
         LOGGER.info("Signal analyzer attached (LIVE placing orders on signals)")
