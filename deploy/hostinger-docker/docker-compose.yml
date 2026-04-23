@@ -1,7 +1,8 @@
 services:
   bot:
     build:
-      context: ..
+      # Compose file lives in deploy/hostinger-docker/ — repo root is two levels up.
+      context: ../..
       dockerfile: deploy/hostinger-docker/Dockerfile
     restart: unless-stopped
     environment:
