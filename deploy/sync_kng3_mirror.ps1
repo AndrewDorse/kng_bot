@@ -4,8 +4,8 @@
 #
 # Paths: deploy/KNG3_MIRROR.txt — edit MIRROR_LOCAL_PATH if your mirror moves.
 #
-# File list must stay aligned with KNG3's Dockerfile COPY lines (not deploy/hostinger-docker
-# from kng_bot3, which is a different layout).
+# File list must stay aligned with KNG3's Dockerfile COPY lines only.
+# Docker / compose for production: repo at MIRROR_LOCAL_PATH in KNG3_MIRROR.txt — not under kng_bot3/deploy.
 
 $ErrorActionPreference = "Stop"
 $deployDir = $PSScriptRoot

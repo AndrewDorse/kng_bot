@@ -1,0 +1,14 @@
+---
+description: Docker / deploy target for Paladin v7 is KNG3 mirror only
+alwaysApply: true
+---
+
+# Deploy target (mandatory)
+
+When the user says **deploy**, **Docker**, **go live**, **mirror**, or **KNG3** in the context of shipping the Paladin v7 bot:
+
+1. **The only Docker/production layout to edit is** the separate repo at **`C:\Users\Lenovo\Documents\Git\KNG3`** (or whatever path is in `deploy/KNG3_MIRROR.txt` under `MIRROR_LOCAL_PATH`).
+2. **Do not** add or maintain a parallel Docker setup under `kng_bot3/deploy/` (e.g. no `hostinger-docker` stack in this repo for this bot).
+3. To sync strategy/runtime files from `kng_bot3` into KNG3, use **`deploy/sync_kng3_mirror.ps1`**, then commit in **KNG3**, not in `kng_bot3`, for Docker image changes.
+
+`kng_bot3` stays the development codebase; **KNG3** is the minimal image repo the user deploys.

@@ -1,4 +1,5 @@
-# KNG3 deploy mirror — canonical references (do not guess URLs; edit here if the mirror moves).
+# KNG3 deploy mirror — ONLY target for Docker / "deploy" for Paladin v7 (do not add docker under kng_bot3/deploy).
+# Canonical references (do not guess URLs; edit here if the mirror moves).
 #
 # From session / prior deploy work:
 #   - Local working copy:  C:\Users\Lenovo\Documents\Git\KNG3
