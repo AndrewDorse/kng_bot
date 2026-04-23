@@ -59,6 +59,7 @@ def _v7_params_from_config(cfg: BotConfig) -> PaladinV7Params:
         first_leg_max_pm=float(cfg.paladin_v7_first_leg_max_pm),
         cheap_other_margin=float(cfg.paladin_v7_cheap_other_margin),
         cheap_pair_sum_max=float(cfg.paladin_v7_cheap_pair_sum_max),
+        cheap_pair_avg_sum_nonforced_max=float(cfg.paladin_v7_cheap_pair_avg_sum_nonforced_max),
         cheap_hedge_slip_buffer=float(cfg.paladin_v7_cheap_hedge_slip_buffer),
         cheap_hedge_min_delay_sec=float(cfg.paladin_v7_cheap_hedge_min_delay_sec),
         hedge_timeout_seconds=float(cfg.paladin_v7_hedge_timeout_seconds),
@@ -765,13 +766,27 @@ class PaladinV7LiveEngine:
             min_notional: float,
             min_shares: float,
         ) -> float:
+            px_eff = float(px)
+            mh = float(self.config.paladin_v7_cheap_pair_avg_sum_nonforced_max)
+            slip = float(self.config.paladin_v7_cheap_hedge_slip_buffer)
+            # Tighten FAK anchor so fills cannot walk far past the non-forced pair cap (forced hedge uncapped here).
+            if reason == "v7_hedge_cheap" and runner.pending_second is not None:
+                avg_first = float(runner.pending_second[2])
+                px_eff = min(px_eff, max(0.01, mh - avg_first - slip - 1e-4))
+            elif reason == "v7_first_binance_spike":
+                opp = float(pm_d) if side == "up" else float(pm_u)
+                px_eff = min(px_eff, max(0.01, mh - opp - slip - 1e-4))
+            elif reason == "v7_refill_up":
+                px_eff = min(px_eff, max(0.01, mh - float(pm_d) - slip - 1e-4))
+            elif reason == "v7_refill_dn":
+                px_eff = min(px_eff, max(0.01, mh - float(pm_u) - slip - 1e-4))
             return self._live_buy(
                 contract,
                 st,
                 t=t,
                 side=side,
                 shares=shares,
-                px=px,
+                px=px_eff,
                 reason=reason,
                 budget=budget,
                 min_notional=min_notional,

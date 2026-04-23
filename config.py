@@ -220,6 +220,8 @@ class BotConfig:
     paladin_v7_first_leg_max_pm: float = 0.62
     paladin_v7_cheap_other_margin: float = 0.04
     paladin_v7_cheap_pair_sum_max: float = 0.99
+    # Hard max pair-style sum (mid/VWAP + opposite + slip) for first leg, cheap hedge, refill — not forced hedge.
+    paladin_v7_cheap_pair_avg_sum_nonforced_max: float = 0.96
     # Hedge cheap-gate uses opposite_mid + this buffer vs cap (FAK VWAP often > mid).
     paladin_v7_cheap_hedge_slip_buffer: float = 0.012
     # Seconds after first leg before a *cheap* hedge may execute (0 = immediate when gate passes).
@@ -451,6 +453,10 @@ class BotConfig:
             paladin_v7_first_leg_max_pm=min(0.99, max(0.01, _env_float("BOT_PALADIN_V7_FIRST_LEG_MAX_PM", 0.62))),
             paladin_v7_cheap_other_margin=max(0.0, _env_float("BOT_PALADIN_V7_CHEAP_OTHER_MARGIN", 0.04)),
             paladin_v7_cheap_pair_sum_max=min(1.0, _env_float("BOT_PALADIN_V7_CHEAP_PAIR_SUM_MAX", 0.99)),
+            paladin_v7_cheap_pair_avg_sum_nonforced_max=min(
+                0.99,
+                max(0.85, _env_float("BOT_PALADIN_V7_CHEAP_PAIR_AVG_SUM_NONFORCED_MAX", 0.96)),
+            ),
             paladin_v7_cheap_hedge_slip_buffer=max(
                 0.0, min(0.05, _env_float("BOT_PALADIN_V7_CHEAP_HEDGE_SLIP_BUFFER", 0.012))
             ),

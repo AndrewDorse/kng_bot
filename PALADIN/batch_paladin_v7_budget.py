@@ -276,6 +276,7 @@ def paladin_v7_params_from_bot_config(cfg: BotConfig) -> PaladinV7Params:
         first_leg_max_pm=float(cfg.paladin_v7_first_leg_max_pm),
         cheap_other_margin=float(cfg.paladin_v7_cheap_other_margin),
         cheap_pair_sum_max=float(cfg.paladin_v7_cheap_pair_sum_max),
+        cheap_pair_avg_sum_nonforced_max=float(cfg.paladin_v7_cheap_pair_avg_sum_nonforced_max),
         cheap_hedge_slip_buffer=float(cfg.paladin_v7_cheap_hedge_slip_buffer),
         cheap_hedge_min_delay_sec=float(cfg.paladin_v7_cheap_hedge_min_delay_sec),
         hedge_timeout_seconds=float(cfg.paladin_v7_hedge_timeout_seconds),
