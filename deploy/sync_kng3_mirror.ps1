@@ -1,5 +1,11 @@
-# Sync PALADIN / live bot sources from this repo (kng_bot3) into the KNG3 mirror checkout.
-# Paths and URL are defined in deploy/KNG3_MIRROR.txt — edit that file if your mirror moves.
+# Sync **Docker runtime files only** from kng_bot3 into the KNG3 mirror checkout.
+# KNG3 is a minimal repo (root Dockerfile + v7-only main.py). Do NOT copy the full PALADIN
+# research tree or monolithic main.py — that breaks the image (missing modules / bloat).
+#
+# Paths: deploy/KNG3_MIRROR.txt — edit MIRROR_LOCAL_PATH if your mirror moves.
+#
+# File list must stay aligned with KNG3's Dockerfile COPY lines (not deploy/hostinger-docker
+# from kng_bot3, which is a different layout).
 
 $ErrorActionPreference = "Stop"
 $deployDir = $PSScriptRoot
@@ -21,37 +27,42 @@ if (-not (Test-Path (Join-Path $dst ".git"))) {
 }
 
 $src = $repoRoot
-Write-Host "Sync kng_bot3 -> KNG3"
+Write-Host "Sync kng_bot3 -> KNG3 (Docker runtime files ONLY)"
 Write-Host "  SRC: $src"
 Write-Host "  DST: $dst"
 
-$files = @(
-    "main.py",
+$rootFiles = @(
     "config.py",
     "trader.py",
     "market_locator.py",
-    "btc15_redeem_engine.py",
     "btc_price_feed.py",
-    "signal_analyzer.py",
     "http_session.py",
     "polymarket_ws.py",
     "clob_fak.py",
-    "paladin_live_engine.py",
     "paladin_v7_live_engine.py"
 )
 
-foreach ($f in $files) {
+foreach ($f in $rootFiles) {
     $sp = Join-Path $src $f
     if (-not (Test-Path $sp)) { throw "Missing source file: $sp" }
     Copy-Item -Path $sp -Destination (Join-Path $dst $f) -Force
 }
 
-$paladinSrc = Join-Path $src "PALADIN"
-$paladinDst = Join-Path $dst "PALADIN"
-if (Test-Path $paladinDst) {
-    Remove-Item -Recurse -Force $paladinDst
+$paladinFiles = @(
+    "paladin_engine.py",
+    "paladin_v7.py",
+    "simulate_paladin_window.py",
+    "paladin_sim_config.json"
+)
+$paladinDstDir = Join-Path $dst "PALADIN"
+if (-not (Test-Path $paladinDstDir)) {
+    New-Item -ItemType Directory -Path $paladinDstDir | Out-Null
 }
-Copy-Item -Path $paladinSrc -Destination $paladinDst -Recurse -Force
+foreach ($f in $paladinFiles) {
+    $sp = Join-Path (Join-Path $src "PALADIN") $f
+    if (-not (Test-Path $sp)) { throw "Missing source file: $sp" }
+    Copy-Item -Path $sp -Destination (Join-Path $paladinDstDir $f) -Force
+}
 
-Write-Host "Done. Next in KNG3: git status, git commit, git push origin main"
-Write-Host "Tip: KNG3 Dockerfiles must COPY paladin_v7_live_engine.py (match kng_bot3 deploy/hostinger-docker/Dockerfile)."
+Write-Host "Done. In KNG3: git status, git diff, then commit + push."
+Write-Host "Do NOT run git add -A on KNG3 unless you intend to ship non-Docker artifacts."
