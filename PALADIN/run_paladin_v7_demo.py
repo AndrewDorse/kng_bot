@@ -77,7 +77,7 @@ def main() -> int:
         _p(f"=== PALADIN v7 window [{idx}/{len(paths)}] slug={slug}")
         _p(f"file={path.name}")
         _p(
-            f"params: clip={params.clip_shares} max/side={params.max_shares_per_side} "
+            f"params: base_order={params.base_order_shares} max/side={params.max_shares_per_side} "
             f"budget={params.budget_usdc} vol_ratio={params.volume_spike_ratio} "
             f"lookback={params.volume_lookback_sec}s btc_move>={params.btc_abs_move_min_usd} "
             f"hedge_timeout={params.hedge_timeout_seconds}s"

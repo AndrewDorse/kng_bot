@@ -4,20 +4,15 @@ PALADIN v7 (sim): Binance per-second volume spike + BTC price impulse → Polyma
 
 1) **First leg** when (rolling Binance base-volume vs lookback mean) spikes *and* BTC price moves
    in the same second; side = momentum (price up → UP token, down → DOWN token). Gated by
-   ``first_leg_max_pm`` only — **not** by ``_nonforced_pair_cap`` (that cap is for hedge/refill only).
-2) **Second leg** (hedge) on the opposite outcome token: prefer a *cheap* fill when
-   **first-leg VWAP + current opposite mid (+ slip buffer)** <= ``_nonforced_pair_cap`` (the minimum of
-   ``cheap_pair_sum_max``, ``1 - cheap_other_margin``, and ``cheap_pair_avg_sum_nonforced_max``, default **0.96**).
-   (held + quote for the hedge leg — not live ``pm_u+pm_d``, which sits ~1.0). Cheap hedge may fire on the
-   **next** second as soon as that gate passes — ``hedge_timeout_seconds`` is **not** a minimum gap between
-   legs; it is the **maximum** age before a **forced** hedge when pm_up+pm_down <= ``forced_hedge_max_book_sum``.
-   Optional ``cheap_hedge_min_delay_sec`` enforces a minimum wait before allowing a cheap hedge (forced path
-   unchanged).
-3) **Refill** after a balanced pair: smaller clip when mids improve each leg and **projected**
-   ``avg_up + avg_down`` after the refill (our VWAPs, not ``pm_u+pm_d``) is under the non-forced cap;
-   optional loose screen ``pm_u+pm_d <= refill_max_pair_sum`` for book tightness only.
+   ``first_leg_max_pm`` only — **not** by ``_nonforced_pair_cap`` (that cap is for hedges / layer-2 hedge only).
+2) **Second leg** (hedge) on the opposite outcome: *cheap* when
+   **held VWAP on the opened side + opposite mid + slip** <= ``_nonforced_pair_cap``; *forced* when
+   age >= ``hedge_timeout_seconds`` and ``pm_u+pm_d <= forced_hedge_max_book_sum``.
+3) **Layer 2** after a balanced pair: if the **lead** side (higher mid) has inventory and its mid is at least
+   ``layer2_dip_below_avg`` below that side's VWAP, buy ``base_order_shares`` on the lead side, then hedge
+   the opposite with the same cheap/forced rules as (2).
 
-Uses the same ``SimState`` / ``try_buy`` / ``improves_leg`` as the PALADIN window harness.
+Uses ``SimState`` / ``try_buy`` from the PALADIN window harness.
 """
 
 from __future__ import annotations
@@ -27,7 +22,7 @@ from pathlib import Path
 import csv
 from typing import Any, Callable, Literal
 
-from simulate_paladin_window import SimState, improves_leg, try_buy
+from simulate_paladin_window import SimState, try_buy
 
 TryBuyFn = Callable[..., float]
 
@@ -47,8 +42,8 @@ class WindowTick:
 @dataclass(slots=True)
 class PaladinV7Params:
     budget_usdc: float = 400.0
-    # Defaults match BotConfig / env (see config.py BOT_PALADIN_V7_CLIP_SHARES, MAX_SHARES_PER_SIDE).
-    clip_shares: float = 5.0
+    # First leg, layer-2 dip add, and hedge clip size (see BOT_PALADIN_V7_BASE_ORDER_SHARES).
+    base_order_shares: float = 5.0
     max_shares_per_side: float = 10.0
     min_notional: float = 1.0
     min_shares: float = 5.0
@@ -61,8 +56,7 @@ class PaladinV7Params:
     first_leg_max_pm: float = 0.62
     cheap_other_margin: float = 0.04
     cheap_pair_sum_max: float = 0.99
-    # Ceiling for *our* economics: cheap hedge (held VWAP + opposite + slip) and refill (projected avg_up+avg_down).
-    # Spike *first* leg uses ``first_leg_max_pm`` only. Refill book screen uses ``refill_max_pair_sum`` (pm_u+pm_d).
+    # Ceiling for *our* economics: cheap hedge (held VWAP + opposite + slip). Spike first leg uses first_leg_max_pm only.
     cheap_pair_avg_sum_nonforced_max: float = 0.96
     # Live FAK often walks the book above the WS mid used for gating; require headroom so
     # avg_first + (mid_opposite + buffer) <= cheap cap (avoids approving hedges that fill >1 pair avg).
@@ -73,13 +67,10 @@ class PaladinV7Params:
     hedge_timeout_seconds: float = 90.0
     forced_hedge_max_book_sum: float = 1.30
 
-    refill_clip_fraction: float = 0.5
-    refill_max_pair_sum: float = 0.985
+    # Layer 2: lead side (higher PM mid) mid must be <= that side's avg minus this (e.g. 0.05 = 5c).
+    layer2_dip_below_avg: float = 0.05
 
     pair_cooldown_sec: float = 20.0
-    # Max simulated fills per window (0 = unlimited). New first legs / refills are skipped
-    # unless there is room for the legs (first+hedge needs 2 slots; symmetric refill needs 2).
-    max_orders: int = 0
 
 
 @dataclass(slots=True)
@@ -187,45 +178,19 @@ def _price_jump(ticks: list[WindowTick], t: int, p: PaladinV7Params) -> bool:
     return abs(ticks[t].btc_px - prev) >= float(p.btc_abs_move_min_usd)
 
 
+def _lead_side(pm_u: float, pm_d: float) -> Side:
+    """Higher Polymarket mid = favorite (tie → up)."""
+    if pm_u > pm_d + 1e-12:
+        return "up"
+    if pm_d > pm_u + 1e-12:
+        return "down"
+    return "up"
+
+
 def _nonforced_pair_cap(p: PaladinV7Params) -> float:
-    """Ceiling for *our* pair economics: cheap hedge (held VWAP + opposite + slip) and refill (projected leg VWAP sum)."""
+    """Ceiling for cheap hedge: held VWAP + opposite mid + slip."""
     base = min(float(p.cheap_pair_sum_max), 1.0 - float(p.cheap_other_margin))
     return min(base, float(p.cheap_pair_avg_sum_nonforced_max))
-
-
-def _position_pair_vwap_sum_after_adds(
-    su: float,
-    au: float,
-    sd: float,
-    ad: float,
-    *,
-    q_u: float,
-    pu: float,
-    q_d: float,
-    pd: float,
-) -> float:
-    """``avg_up + avg_down`` after adding ``q_u`` @ ``pu`` on UP and ``q_d`` @ ``pd`` on DOWN (inventory VWAPs)."""
-    su, sd = max(0.0, float(su)), max(0.0, float(sd))
-    if q_u > 1e-12:
-        nu = (su * float(au) + float(q_u) * float(pu)) / (su + float(q_u))
-    else:
-        nu = float(au) if su > 1e-12 else float(pu)
-    if q_d > 1e-12:
-        nd = (sd * float(ad) + float(q_d) * float(pd)) / (sd + float(q_d))
-    else:
-        nd = float(ad) if sd > 1e-12 else float(pd)
-    return float(nu) + float(nd)
-
-
-def _n_fills_for_order_budget(st: SimState) -> int:
-    """Count trades toward ``max_orders``; omit API/reconcile bookkeeping rows."""
-    n = 0
-    for tr in st.trades:
-        r = str(tr.reason)
-        if "v7_api_reconcile_sync" in r or "v7_post_fak_api_sync" in r:
-            continue
-        n += 1
-    return n
 
 
 def _clamp_shares(st: SimState, side: Side, sh: float, cap: float, min_sh: float) -> float:
@@ -250,8 +215,7 @@ def paladin_v7_step(
     pm_u, pm_d = float(tick.pm_u), float(tick.pm_d)
     buy: Any = try_buy_fn if try_buy_fn is not None else try_buy
     min_sh = float(p.min_shares)
-    mo = int(p.max_orders)
-    n_tr = _n_fills_for_order_budget(st)
+    base_sz = float(p.base_order_shares)
 
     # --- Pending hedge (second leg on *other* side) ---
     if runner.pending_second is not None:
@@ -269,9 +233,6 @@ def paladin_v7_step(
         ok_cheap = (age + 1e-9 >= min_cheap_age) and (pair_held_quote_sum + 1e-9 <= cap)
 
         ok_forced = forced and (pm_u + pm_d) + 1e-9 <= float(p.forced_hedge_max_book_sum)
-
-        if mo > 0 and n_tr >= mo:
-            return
 
         if ok_cheap or ok_forced:
             sh_exec = _clamp_shares(st, side_o, sh_need, p.max_shares_per_side, min_sh)
@@ -307,60 +268,38 @@ def paladin_v7_step(
     flat = st.size_up <= 1e-9 and st.size_down <= 1e-9
     both = st.size_up > 1e-9 and st.size_down > 1e-9
 
-    # --- Refill: smaller symmetric clip when book is tight and both legs improve ---
-    refill_sh = max(min_sh, float(p.clip_shares) * float(p.refill_clip_fraction))
-    if mo > 0 and n_tr + 2 > mo:
-        pass  # skip refill; not enough order budget for two legs
-    elif balanced and both and (float(t) - float(runner.last_completed_pair_elapsed)) >= 1.0:
-        sh_u = _clamp_shares(st, "up", refill_sh, p.max_shares_per_side, min_sh)
-        sh_d = _clamp_shares(st, "down", refill_sh, p.max_shares_per_side, min_sh)
+    # --- Layer 2: lead (higher mid) side mid dipped vs our avg on that side; add base_sz; hedge opposite ---
+    if balanced and both and (float(t) - float(runner.last_completed_pair_elapsed)) >= 1.0:
+        lead = _lead_side(pm_u, pm_d)
+        sz_l = st.size_up if lead == "up" else st.size_down
+        avg_l = st.avg_up if lead == "up" else st.avg_down
+        px_l = pm_u if lead == "up" else pm_d
+        dip = max(0.0, float(p.layer2_dip_below_avg))
+        other_l2: Side = "down" if lead == "up" else "up"
+        sh_add = _clamp_shares(st, lead, base_sz, p.max_shares_per_side, min_sh)
+        room_o = float(p.max_shares_per_side) - (
+            float(st.size_down) if other_l2 == "down" else float(st.size_up)
+        )
         if (
-            sh_u >= min_sh - 1e-9
-            and sh_d >= min_sh - 1e-9
-            and (pm_u + pm_d) + 1e-9 <= float(p.refill_max_pair_sum)
-            and _position_pair_vwap_sum_after_adds(
-                st.size_up,
-                st.avg_up,
-                st.size_down,
-                st.avg_down,
-                q_u=sh_u,
-                pu=pm_u,
-                q_d=sh_d,
-                pd=pm_d,
-            )
-            <= _nonforced_pair_cap(p) + 1e-9
-            # Allow mids at leg VWAP (strict < blocked many refills right after a tight hedge).
-            and pm_u <= st.avg_up + 1e-8
-            and pm_d <= st.avg_down + 1e-8
-            and improves_leg(st.size_up, st.avg_up, pm_u, sh_u)
-            and improves_leg(st.size_down, st.avg_down, pm_d, sh_d)
+            sz_l >= min_sh - 1e-9
+            and px_l + 1e-9 <= avg_l - dip
+            and sh_add >= min_sh - 1e-9
+            and room_o + 1e-9 >= sh_add - 1e-6
         ):
-            up_fill = buy(
+            filled_l2 = buy(
                 st,
                 t=t,
-                side="up",
-                shares=sh_u,
-                px=pm_u,
-                reason="v7_refill_up",
+                side=lead,
+                shares=sh_add,
+                px=px_l,
+                reason="v7_layer2_dip_lead",
                 budget=p.budget_usdc,
                 min_notional=p.min_notional,
                 min_shares=min_sh,
             )
-            # Only add the paired Down clip if the Up clip fully sized (avoids one-sided refill on partial FAK).
-            if up_fill + 1e-9 >= float(sh_u):
-                sh_d2 = _clamp_shares(st, "down", refill_sh, p.max_shares_per_side, min_sh)
-                if sh_d2 >= min_sh - 1e-9 and improves_leg(st.size_down, st.avg_down, pm_d, sh_d2):
-                    buy(
-                        st,
-                        t=t,
-                        side="down",
-                        shares=sh_d2,
-                        px=pm_d,
-                        reason="v7_refill_dn",
-                        budget=p.budget_usdc,
-                        min_notional=p.min_notional,
-                        min_shares=min_sh,
-                    )
+            if filled_l2 > 1e-9:
+                leg_avg = float(st.avg_up) if lead == "up" else float(st.avg_down)
+                runner.pending_second = (other_l2, float(filled_l2), leg_avg, int(t))
             return
 
     # --- New first leg on Binance spike + jump ---
@@ -368,9 +307,6 @@ def paladin_v7_step(
     if not can_open:
         return
     if float(t) - float(runner.last_completed_pair_elapsed) < float(p.pair_cooldown_sec) and not flat:
-        return
-
-    if mo > 0 and n_tr + 2 > mo:
         return
 
     if not (_volume_spike(ticks, t, p) and _price_jump(ticks, t, p)):
@@ -384,7 +320,7 @@ def paladin_v7_step(
     if px_1 + 1e-9 > float(p.first_leg_max_pm):
         return
 
-    sh1 = _clamp_shares(st, mom, p.clip_shares, p.max_shares_per_side, min_sh)
+    sh1 = _clamp_shares(st, mom, base_sz, p.max_shares_per_side, min_sh)
     if sh1 < min_sh - 1e-9:
         return
 
@@ -406,12 +342,11 @@ def paladin_v7_step(
         runner.pending_second = (other, float(matched), leg_avg, int(t))
 
 
-# Tight sim: $10 budget, 10 shares/side cap, 5-share clips, at most 4 fills (two spike pairs or one pair+refill).
+# Tight sim: $10 budget, 10 shares/side cap, 5-share base orders (batch preset label kept for scripts).
 V7_SMALL_BUDGET_4ORDERS = PaladinV7Params(
     budget_usdc=10.0,
-    clip_shares=5.0,
+    base_order_shares=5.0,
     max_shares_per_side=10.0,
-    max_orders=4,
     min_notional=1.0,
     min_shares=5.0,
     forced_hedge_max_book_sum=1.5,

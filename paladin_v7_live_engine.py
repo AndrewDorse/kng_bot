@@ -48,7 +48,7 @@ def _can_afford_live(spent: float, add: float, budget: float) -> bool:
 def _v7_params_from_config(cfg: BotConfig) -> PaladinV7Params:
     return PaladinV7Params(
         budget_usdc=float(cfg.strategy_budget_cap_usdc),
-        clip_shares=float(cfg.paladin_v7_clip_shares),
+        base_order_shares=float(cfg.paladin_v7_base_order_shares),
         max_shares_per_side=float(cfg.paladin_v7_max_shares_per_side),
         min_notional=float(cfg.paladin_v7_min_notional),
         min_shares=float(cfg.paladin_v7_min_shares),
@@ -64,10 +64,8 @@ def _v7_params_from_config(cfg: BotConfig) -> PaladinV7Params:
         cheap_hedge_min_delay_sec=float(cfg.paladin_v7_cheap_hedge_min_delay_sec),
         hedge_timeout_seconds=float(cfg.paladin_v7_hedge_timeout_seconds),
         forced_hedge_max_book_sum=float(cfg.paladin_v7_forced_hedge_max_book_sum),
-        refill_clip_fraction=float(cfg.paladin_v7_refill_clip_fraction),
-        refill_max_pair_sum=float(cfg.paladin_v7_refill_max_pair_sum),
+        layer2_dip_below_avg=float(cfg.paladin_v7_layer2_dip_below_avg),
         pair_cooldown_sec=float(cfg.paladin_v7_pair_cooldown_sec),
-        max_orders=int(cfg.paladin_v7_max_orders),
     )
 
 
@@ -142,13 +140,13 @@ class PaladinV7LiveEngine:
         signal.signal(signal.SIGINT, self._sig)
         signal.signal(signal.SIGTERM, self._sig)
         LOGGER.info(
-            "PALADIN v7 live started | dry_run=%s poll=%.1fs budget=$%.2f clip=%.1f max/side=%.0f max_orders=%d",
+            "PALADIN v7 live started | dry_run=%s poll=%.1fs budget=$%.2f base_order=%.1f max/side=%.0f layer2_dip=%.3f",
             self.config.dry_run,
             float(self.config.poll_interval_seconds),
             float(self.config.strategy_budget_cap_usdc),
-            float(self.config.paladin_v7_clip_shares),
+            float(self.config.paladin_v7_base_order_shares),
             float(self.config.paladin_v7_max_shares_per_side),
-            int(self.config.paladin_v7_max_orders),
+            float(self.config.paladin_v7_layer2_dip_below_avg),
         )
         LOGGER.info(
             "PALADIN v7 reconcile | enabled=%s every=%.1fs tol=%.2f sh confirm_reads=%d flatten=%s",
@@ -519,7 +517,7 @@ class PaladinV7LiveEngine:
         cur_light = float(st.size_down) if imb > 0 else float(st.size_up)
         room = max(0.0, cap - cur_light)
         need = abs(imb)
-        clip = float(self.config.paladin_v7_clip_shares)
+        clip = float(self.config.paladin_v7_base_order_shares)
         sh = float(min(need, clip, room))
         if sh < float(self.config.paladin_v7_min_shares) - 1e-9:
             LOGGER.info(
@@ -769,7 +767,7 @@ class PaladinV7LiveEngine:
             px_eff = float(px)
             mh = float(self.config.paladin_v7_cheap_pair_avg_sum_nonforced_max)
             slip = float(self.config.paladin_v7_cheap_hedge_slip_buffer)
-            # Non-forced cap on *our* hedge: clamp FAK vs held first-leg VWAP (refill gated in sim on projected VWAPs).
+            # Non-forced cap on *our* hedge: clamp FAK vs held first-leg VWAP (same economics as sim).
             if reason == "v7_hedge_cheap" and runner.pending_second is not None:
                 avg_first = float(runner.pending_second[2])
                 px_eff = min(px_eff, max(0.01, mh - avg_first - slip - 1e-4))

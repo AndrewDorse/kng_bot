@@ -191,8 +191,8 @@ def format_v7_budget_report(
     if run_label:
         lines.append(f"run_label={run_label}")
     lines.append(
-        f"preset=budget {params.budget_usdc} clip {params.clip_shares} max/side {params.max_shares_per_side} "
-        f"max_orders={params.max_orders} cheap_pair_sum_max={params.cheap_pair_sum_max} "
+        f"preset=budget {params.budget_usdc} base_order {params.base_order_shares} max/side {params.max_shares_per_side} "
+        f"layer2_dip={params.layer2_dip_below_avg} cheap_pair_sum_max={params.cheap_pair_sum_max} "
         f"cheap_hedge_slip={params.cheap_hedge_slip_buffer} "
         f"forced_hedge_max_book_sum={params.forced_hedge_max_book_sum}"
     )
@@ -265,7 +265,7 @@ def paladin_v7_params_from_bot_config(cfg: BotConfig) -> PaladinV7Params:
     """Same field mapping as ``paladin_v7_live_engine._v7_params_from_config`` (sim has no API reconcile)."""
     return PaladinV7Params(
         budget_usdc=float(cfg.strategy_budget_cap_usdc),
-        clip_shares=float(cfg.paladin_v7_clip_shares),
+        base_order_shares=float(cfg.paladin_v7_base_order_shares),
         max_shares_per_side=float(cfg.paladin_v7_max_shares_per_side),
         min_notional=float(cfg.paladin_v7_min_notional),
         min_shares=float(cfg.paladin_v7_min_shares),
@@ -281,10 +281,8 @@ def paladin_v7_params_from_bot_config(cfg: BotConfig) -> PaladinV7Params:
         cheap_hedge_min_delay_sec=float(cfg.paladin_v7_cheap_hedge_min_delay_sec),
         hedge_timeout_seconds=float(cfg.paladin_v7_hedge_timeout_seconds),
         forced_hedge_max_book_sum=float(cfg.paladin_v7_forced_hedge_max_book_sum),
-        refill_clip_fraction=float(cfg.paladin_v7_refill_clip_fraction),
-        refill_max_pair_sum=float(cfg.paladin_v7_refill_max_pair_sum),
+        layer2_dip_below_avg=float(cfg.paladin_v7_layer2_dip_below_avg),
         pair_cooldown_sec=float(cfg.paladin_v7_pair_cooldown_sec),
-        max_orders=int(cfg.paladin_v7_max_orders),
     )
 
 
@@ -323,16 +321,10 @@ def main() -> int:
         help="Override PaladinV7Params.max_shares_per_side (bot_config/small_budget base).",
     )
     ap.add_argument(
-        "--clip-shares",
+        "--base-order-shares",
         type=float,
         default=None,
-        help="Override PaladinV7Params.clip_shares.",
-    )
-    ap.add_argument(
-        "--max-orders",
-        type=int,
-        default=None,
-        help="Override PaladinV7Params.max_orders (0 = unlimited).",
+        help="Override PaladinV7Params.base_order_shares.",
     )
     ap.add_argument(
         "--run-label",
@@ -368,10 +360,8 @@ def main() -> int:
         params = V7_SMALL_BUDGET_4ORDERS
     if args.max_shares_per_side is not None:
         params = replace(params, max_shares_per_side=float(args.max_shares_per_side))
-    if args.clip_shares is not None:
-        params = replace(params, clip_shares=float(args.clip_shares))
-    if args.max_orders is not None:
-        params = replace(params, max_orders=int(args.max_orders))
+    if args.base_order_shares is not None:
+        params = replace(params, base_order_shares=float(args.base_order_shares))
     pnls, orders, slugs, skipped, imbalanced_end = simulate_v7_budget_on_paths(paths, params)
     text = format_v7_budget_report(
         exports_dir=args.exports_dir,

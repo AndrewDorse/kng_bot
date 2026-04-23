@@ -220,7 +220,7 @@ class BotConfig:
     paladin_v7_first_leg_max_pm: float = 0.62
     paladin_v7_cheap_other_margin: float = 0.04
     paladin_v7_cheap_pair_sum_max: float = 0.99
-    # Max *our* pair cost: cheap hedge held VWAP + opposite + slip; refill projected avg_up+avg_down. Not pm_u+pm_d cap.
+    # Max *our* pair cost: cheap hedge held VWAP + opposite + slip (not raw pm_u+pm_d).
     paladin_v7_cheap_pair_avg_sum_nonforced_max: float = 0.96
     # Hedge cheap-gate uses opposite_mid + this buffer vs cap (FAK VWAP often > mid).
     paladin_v7_cheap_hedge_slip_buffer: float = 0.012
@@ -228,12 +228,12 @@ class BotConfig:
     paladin_v7_cheap_hedge_min_delay_sec: float = 0.0
     paladin_v7_hedge_timeout_seconds: float = 90.0
     paladin_v7_forced_hedge_max_book_sum: float = 1.30
-    paladin_v7_refill_clip_fraction: float = 0.5
-    paladin_v7_refill_max_pair_sum: float = 0.985
     paladin_v7_pair_cooldown_sec: float = 20.0
-    paladin_v7_clip_shares: float = 5.0
+    # First leg, layer-2 dip add, and hedge clip (BOT_PALADIN_V7_BASE_ORDER_SHARES; legacy BOT_PALADIN_V7_CLIP_SHARES).
+    paladin_v7_base_order_shares: float = 5.0
     paladin_v7_max_shares_per_side: float = 10.0
-    paladin_v7_max_orders: int = 4
+    # Layer 2: lead-side mid must be <= that leg's avg minus this (e.g. 0.05 = 5c dip).
+    paladin_v7_layer2_dip_below_avg: float = 0.05
     paladin_v7_min_notional: float = 1.0
     paladin_v7_min_shares: float = 5.0
     # Live: poll CLOB conditional balances vs SimState; debounce to tolerate API delay.
@@ -467,12 +467,16 @@ class BotConfig:
             paladin_v7_forced_hedge_max_book_sum=min(
                 1.50, max(1.0, _env_float("BOT_PALADIN_V7_FORCED_HEDGE_SUM_MAX", 1.30))
             ),
-            paladin_v7_refill_clip_fraction=min(1.0, max(0.1, _env_float("BOT_PALADIN_V7_REFILL_CLIP_FRAC", 0.5))),
-            paladin_v7_refill_max_pair_sum=min(1.0, _env_float("BOT_PALADIN_V7_REFILL_PAIR_SUM_MAX", 0.985)),
             paladin_v7_pair_cooldown_sec=max(0.0, _env_float("BOT_PALADIN_V7_PAIR_COOLDOWN_SEC", 20.0)),
-            paladin_v7_clip_shares=max(1.0, _env_float("BOT_PALADIN_V7_CLIP_SHARES", 5.0)),
+            paladin_v7_base_order_shares=(
+                max(1.0, _env_float("BOT_PALADIN_V7_BASE_ORDER_SHARES", 5.0))
+                if (os.getenv("BOT_PALADIN_V7_BASE_ORDER_SHARES") or "").strip()
+                else max(1.0, _env_float("BOT_PALADIN_V7_CLIP_SHARES", 5.0))
+            ),
             paladin_v7_max_shares_per_side=max(1.0, _env_float("BOT_PALADIN_V7_MAX_SHARES_PER_SIDE", 10.0)),
-            paladin_v7_max_orders=max(0, _env_int("BOT_PALADIN_V7_MAX_ORDERS", 4)),
+            paladin_v7_layer2_dip_below_avg=max(
+                0.0, min(0.5, _env_float("BOT_PALADIN_V7_LAYER2_DIP_BELOW_AVG", 0.05))
+            ),
             paladin_v7_min_notional=max(0.01, _env_float("BOT_PALADIN_V7_MIN_NOTIONAL", 1.0)),
             paladin_v7_min_shares=max(1.0, _env_float("BOT_PALADIN_V7_MIN_SHARES", 5.0)),
             paladin_v7_reconcile_enabled=_env_bool("BOT_PALADIN_V7_RECONCILE_ENABLED", True),
