@@ -47,8 +47,9 @@ class WindowTick:
 @dataclass(slots=True)
 class PaladinV7Params:
     budget_usdc: float = 400.0
-    clip_shares: float = 10.0
-    max_shares_per_side: float = 80.0
+    # Defaults match BotConfig / env (see config.py BOT_PALADIN_V7_CLIP_SHARES, MAX_SHARES_PER_SIDE).
+    clip_shares: float = 5.0
+    max_shares_per_side: float = 10.0
     min_notional: float = 1.0
     min_shares: float = 5.0
 
