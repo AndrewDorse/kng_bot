@@ -769,14 +769,10 @@ class PaladinV7LiveEngine:
             px_eff = float(px)
             mh = float(self.config.paladin_v7_cheap_pair_avg_sum_nonforced_max)
             slip = float(self.config.paladin_v7_cheap_hedge_slip_buffer)
-            # Non-forced pair cap applies to cheap *hedge* and *refill* FAK anchors only — not first leg opens.
+            # Non-forced cap on *our* hedge: clamp FAK vs held first-leg VWAP (refill gated in sim on projected VWAPs).
             if reason == "v7_hedge_cheap" and runner.pending_second is not None:
                 avg_first = float(runner.pending_second[2])
                 px_eff = min(px_eff, max(0.01, mh - avg_first - slip - 1e-4))
-            elif reason == "v7_refill_up":
-                px_eff = min(px_eff, max(0.01, mh - float(pm_d) - slip - 1e-4))
-            elif reason == "v7_refill_dn":
-                px_eff = min(px_eff, max(0.01, mh - float(pm_u) - slip - 1e-4))
             return self._live_buy(
                 contract,
                 st,

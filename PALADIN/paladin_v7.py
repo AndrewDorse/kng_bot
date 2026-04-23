@@ -13,8 +13,9 @@ PALADIN v7 (sim): Binance per-second volume spike + BTC price impulse → Polyma
    legs; it is the **maximum** age before a **forced** hedge when pm_up+pm_down <= ``forced_hedge_max_book_sum``.
    Optional ``cheap_hedge_min_delay_sec`` enforces a minimum wait before allowing a cheap hedge (forced path
    unchanged).
-3) **Refill** after a balanced pair: smaller clip (>= min_shares) when both mids are below
-   leg averages (symmetric improvement), and book sum is tight enough.
+3) **Refill** after a balanced pair: smaller clip when mids improve each leg and **projected**
+   ``avg_up + avg_down`` after the refill (our VWAPs, not ``pm_u+pm_d``) is under the non-forced cap;
+   optional loose screen ``pm_u+pm_d <= refill_max_pair_sum`` for book tightness only.
 
 Uses the same ``SimState`` / ``try_buy`` / ``improves_leg`` as the PALADIN window harness.
 """
@@ -59,8 +60,8 @@ class PaladinV7Params:
     first_leg_max_pm: float = 0.62
     cheap_other_margin: float = 0.04
     cheap_pair_sum_max: float = 0.99
-    # Hard ceiling for cheap *hedge* (held VWAP + opposite mid + slip) and *refill* book-sum gate until forced.
-    # Spike *first* leg is gated by ``first_leg_max_pm`` only, not this field.
+    # Ceiling for *our* economics: cheap hedge (held VWAP + opposite + slip) and refill (projected avg_up+avg_down).
+    # Spike *first* leg uses ``first_leg_max_pm`` only. Refill book screen uses ``refill_max_pair_sum`` (pm_u+pm_d).
     cheap_pair_avg_sum_nonforced_max: float = 0.96
     # Live FAK often walks the book above the WS mid used for gating; require headroom so
     # avg_first + (mid_opposite + buffer) <= cheap cap (avoids approving hedges that fill >1 pair avg).
@@ -186,9 +187,33 @@ def _price_jump(ticks: list[WindowTick], t: int, p: PaladinV7Params) -> bool:
 
 
 def _nonforced_pair_cap(p: PaladinV7Params) -> float:
-    """Max pair-style sum for cheap *hedge* and *refill* gates (not Binance spike first leg). Forced hedge ignores."""
+    """Ceiling for *our* pair economics: cheap hedge (held VWAP + opposite + slip) and refill (projected leg VWAP sum)."""
     base = min(float(p.cheap_pair_sum_max), 1.0 - float(p.cheap_other_margin))
     return min(base, float(p.cheap_pair_avg_sum_nonforced_max))
+
+
+def _position_pair_vwap_sum_after_adds(
+    su: float,
+    au: float,
+    sd: float,
+    ad: float,
+    *,
+    q_u: float,
+    pu: float,
+    q_d: float,
+    pd: float,
+) -> float:
+    """``avg_up + avg_down`` after adding ``q_u`` @ ``pu`` on UP and ``q_d`` @ ``pd`` on DOWN (inventory VWAPs)."""
+    su, sd = max(0.0, float(su)), max(0.0, float(sd))
+    if q_u > 1e-12:
+        nu = (su * float(au) + float(q_u) * float(pu)) / (su + float(q_u))
+    else:
+        nu = float(au) if su > 1e-12 else float(pu)
+    if q_d > 1e-12:
+        nd = (sd * float(ad) + float(q_d) * float(pd)) / (sd + float(q_d))
+    else:
+        nd = float(ad) if sd > 1e-12 else float(pd)
+    return float(nu) + float(nd)
 
 
 def _n_fills_for_order_budget(st: SimState) -> int:
@@ -291,7 +316,18 @@ def paladin_v7_step(
         if (
             sh_u >= min_sh - 1e-9
             and sh_d >= min_sh - 1e-9
-            and (pm_u + pm_d) + 1e-9 <= min(float(p.refill_max_pair_sum), _nonforced_pair_cap(p))
+            and (pm_u + pm_d) + 1e-9 <= float(p.refill_max_pair_sum)
+            and _position_pair_vwap_sum_after_adds(
+                st.size_up,
+                st.avg_up,
+                st.size_down,
+                st.avg_down,
+                q_u=sh_u,
+                pu=pm_u,
+                q_d=sh_d,
+                pd=pm_d,
+            )
+            <= _nonforced_pair_cap(p) + 1e-9
             # Allow mids at leg VWAP (strict < blocked many refills right after a tight hedge).
             and pm_u <= st.avg_up + 1e-8
             and pm_d <= st.avg_down + 1e-8

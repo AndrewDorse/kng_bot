@@ -56,7 +56,7 @@ def main() -> int:
             float(config.paladin_v7_btc_abs_move_min_usd),
         )
         LOGGER.info(
-            "paladin_v7 hedge/refill cap<=%.4f (not first-leg open) | cheap_min_delay=%.1fs | hedge_timeout=%.1fs | slip_buf=%.4f",
+            "paladin_v7 our_pair_cap<=%.4f (hedge held+opp / refill VWAP sum; not raw pm_u+pm_d) | cheap_min_delay=%.1fs | hedge_timeout=%.1fs | slip=%.4f",
             float(config.paladin_v7_cheap_pair_avg_sum_nonforced_max),
             float(config.paladin_v7_cheap_hedge_min_delay_sec),
             float(config.paladin_v7_hedge_timeout_seconds),
