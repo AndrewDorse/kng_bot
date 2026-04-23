@@ -65,6 +65,10 @@ def _v7_params_from_config(cfg: BotConfig) -> PaladinV7Params:
         hedge_timeout_seconds=float(cfg.paladin_v7_hedge_timeout_seconds),
         forced_hedge_max_book_sum=float(cfg.paladin_v7_forced_hedge_max_book_sum),
         layer2_dip_below_avg=float(cfg.paladin_v7_layer2_dip_below_avg),
+        layer2_low_vwap_dip_below_avg=float(cfg.paladin_v7_layer2_low_vwap_dip_below_avg),
+        balance_share_tolerance=float(cfg.paladin_v7_balance_share_tolerance),
+        imbalance_repair_max_pair_sum=float(cfg.paladin_v7_imbalance_repair_max_pair_sum),
+        layer2_cooldown_sec=float(cfg.paladin_v7_layer2_cooldown_sec),
         pair_cooldown_sec=float(cfg.paladin_v7_pair_cooldown_sec),
     )
 
@@ -140,13 +144,19 @@ class PaladinV7LiveEngine:
         signal.signal(signal.SIGINT, self._sig)
         signal.signal(signal.SIGTERM, self._sig)
         LOGGER.info(
-            "PALADIN v7 live started | dry_run=%s poll=%.1fs budget=$%.2f base_order=%.1f max/side=%.0f layer2_dip=%.3f",
+            "PALADIN v7 live started | dry_run=%s poll=%.1fs budget=$%.2f base_order=%.1f max/side=%.0f "
+            "layer2_hi_dip=%.3f layer2_lo_dip=%.3f bal_tol=%.2fsh layer2_cd=%.1fs imb_repair_pm+avg_heavy<%.3f pair_cd=%.0fs",
             self.config.dry_run,
             float(self.config.poll_interval_seconds),
             float(self.config.strategy_budget_cap_usdc),
             float(self.config.paladin_v7_base_order_shares),
             float(self.config.paladin_v7_max_shares_per_side),
             float(self.config.paladin_v7_layer2_dip_below_avg),
+            float(self.config.paladin_v7_layer2_low_vwap_dip_below_avg),
+            float(self.config.paladin_v7_balance_share_tolerance),
+            float(self.config.paladin_v7_layer2_cooldown_sec),
+            float(self.config.paladin_v7_imbalance_repair_max_pair_sum),
+            float(self.config.paladin_v7_pair_cooldown_sec),
         )
         LOGGER.info(
             "PALADIN v7 reconcile | enabled=%s every=%.1fs tol=%.2f sh confirm_reads=%d flatten=%s",
@@ -474,8 +484,9 @@ class PaladinV7LiveEngine:
         """Rebuild open-hedge intent from inventory after API sync (do not drop pending on stale reads)."""
         st = runner.st
         du = float(st.size_up) - float(st.size_down)
-        ms = float(self.config.paladin_v7_min_shares)
-        eps = max(0.06, ms * 0.51)
+        # Treat only small drift as "flat hedge need" — not min_shares*0.51 (~2.55 sh), which cleared
+        # pending while still multi-share imbalanced and blocked hedges after reconcile.
+        eps = max(0.05, float(self.config.paladin_v7_reconcile_share_tolerance))
         if abs(du) <= eps:
             runner.pending_second = None
             return
