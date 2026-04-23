@@ -8,6 +8,8 @@ same ``elapsed``; we therefore run ``paladin_v7_step`` at most once per ``(slug,
 are not fired twice in the same second (duplicate FAKs). A **set** of fired ``elapsed`` values (not only
 ``last == elapsed``) avoids re-running an older second if ``elapsed`` ever moves backward (clock skew).
 ``pending_second`` is re-read **after** reconcile so cutoff/entry-delay gates match post-sync state.
+When rebuilding pending from inventory, **preserve** the prior hedge ``t0`` for the same hedge side so
+``hedge_timeout_seconds`` is not reset every reconcile (that stranded cheap-failing hedges).
 FAK POST+confirm stays serialized in
 ``PolymarketTrader`` via a lock.
 """
@@ -480,6 +482,17 @@ class PaladinV7LiveEngine:
                     side,
                 )
 
+    @staticmethod
+    def _hedge_t0_preserve_on_resync(
+        prev: tuple[str, float, float, int] | None,
+        hedge_side: str,
+        elapsed: int,
+    ) -> int:
+        """Keep original first-leg time for forced-hedge age; reconciles must not set t0=elapsed each time."""
+        if prev is not None and str(prev[0]) == hedge_side:
+            return int(prev[3])
+        return int(elapsed)
+
     def _resync_pending_second_after_reconcile(self, runner: PaladinV7Runner, elapsed: int) -> None:
         """Rebuild open-hedge intent from inventory after API sync (do not drop pending on stale reads)."""
         st = runner.st
@@ -487,6 +500,7 @@ class PaladinV7LiveEngine:
         # Treat only small drift as "flat hedge need" — not min_shares*0.51 (~2.55 sh), which cleared
         # pending while still multi-share imbalanced and blocked hedges after reconcile.
         eps = max(0.05, float(self.config.paladin_v7_reconcile_share_tolerance))
+        prev = runner.pending_second
         if abs(du) <= eps:
             runner.pending_second = None
             return
@@ -497,12 +511,14 @@ class PaladinV7LiveEngine:
             if float(st.avg_up) <= 1e-9:
                 runner.pending_second = None
                 return
-            runner.pending_second = ("down", float(du), float(st.avg_up), int(elapsed))
+            t0 = self._hedge_t0_preserve_on_resync(prev, "down", elapsed)
+            runner.pending_second = ("down", float(du), float(st.avg_up), t0)
         elif du < -eps:
             if float(st.avg_down) <= 1e-9:
                 runner.pending_second = None
                 return
-            runner.pending_second = ("up", float(-du), float(st.avg_down), int(elapsed))
+            t0 = self._hedge_t0_preserve_on_resync(prev, "up", elapsed)
+            runner.pending_second = ("up", float(-du), float(st.avg_down), t0)
 
     def _maybe_flatten_inventory(
         self,
