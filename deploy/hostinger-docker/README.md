@@ -8,6 +8,10 @@ This folder deploys the **kng_bot3** live bot (`python main.py`) from the **repo
 - `.env.example`: copy to `.env` for local compose; mirror vars in Hostinger UI
 - `docker-compose.yml`: optional local run; defaults **`BOT_STRATEGY_MODE=paladin_v7`**
 
+Local build (from **repo root**):
+
+`docker compose -f deploy/hostinger-docker/docker-compose.yml build`
+
 ## What This Image Runs
 
 - Entrypoint: `python main.py`
