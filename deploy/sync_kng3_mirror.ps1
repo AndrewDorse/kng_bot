@@ -58,7 +58,8 @@ $paladinFiles = @(
     "paladin_engine.py",
     "paladin_v7.py",
     "simulate_paladin_window.py",
-    "paladin_sim_config.json"
+    "paladin_sim_config.json",
+    "V7_ENTRY_RULES.md"
 )
 $paladinDstDir = Join-Path $dst "PALADIN"
 if (-not (Test-Path $paladinDstDir)) {
