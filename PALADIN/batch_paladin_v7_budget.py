@@ -92,10 +92,16 @@ def pm_series_from_ticks(ticks: list) -> list[tuple[float, float]]:
 
 
 def _minimal_bot_config_for_v7_defaults() -> BotConfig:
-    """``BotConfig`` requires key fields; sim only reads v7 + budget defaults."""
+    """``BotConfig`` requires key fields; sim reads v7 knobs aligned with ``BotConfig.from_env()`` for v7.
+
+    Plain ``BotConfig()`` would leave ``strategy_budget_cap_usdc`` at the dataclass default (80);
+    live v7 uses ``10`` when ``BOT_STRATEGY_BUDGET_CAP_USDC`` is unset (see ``config.py``).
+    """
     return BotConfig(
         private_key="0x" + "1" * 64,
         funder="0x" + "2" * 40,
+        strategy_mode="paladin_v7",
+        strategy_budget_cap_usdc=10.0,
     )
 
 
@@ -187,6 +193,7 @@ def format_v7_budget_report(
     lines.append(
         f"preset=budget {params.budget_usdc} clip {params.clip_shares} max/side {params.max_shares_per_side} "
         f"max_orders={params.max_orders} cheap_pair_sum_max={params.cheap_pair_sum_max} "
+        f"cheap_hedge_slip={params.cheap_hedge_slip_buffer} "
         f"forced_hedge_max_book_sum={params.forced_hedge_max_book_sum}"
     )
     lines.append(f"windows_simulated={len(pnls)} skipped_empty_ticks={skipped} collected_paths={collected_paths}")
@@ -269,6 +276,8 @@ def paladin_v7_params_from_bot_config(cfg: BotConfig) -> PaladinV7Params:
         first_leg_max_pm=float(cfg.paladin_v7_first_leg_max_pm),
         cheap_other_margin=float(cfg.paladin_v7_cheap_other_margin),
         cheap_pair_sum_max=float(cfg.paladin_v7_cheap_pair_sum_max),
+        cheap_hedge_slip_buffer=float(cfg.paladin_v7_cheap_hedge_slip_buffer),
+        cheap_hedge_min_delay_sec=float(cfg.paladin_v7_cheap_hedge_min_delay_sec),
         hedge_timeout_seconds=float(cfg.paladin_v7_hedge_timeout_seconds),
         forced_hedge_max_book_sum=float(cfg.paladin_v7_forced_hedge_max_book_sum),
         refill_clip_fraction=float(cfg.paladin_v7_refill_clip_fraction),

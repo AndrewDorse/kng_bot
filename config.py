@@ -220,6 +220,10 @@ class BotConfig:
     paladin_v7_first_leg_max_pm: float = 0.62
     paladin_v7_cheap_other_margin: float = 0.04
     paladin_v7_cheap_pair_sum_max: float = 0.99
+    # Hedge cheap-gate uses opposite_mid + this buffer vs cap (FAK VWAP often > mid).
+    paladin_v7_cheap_hedge_slip_buffer: float = 0.012
+    # Seconds after first leg before a *cheap* hedge may execute (0 = immediate when gate passes).
+    paladin_v7_cheap_hedge_min_delay_sec: float = 0.0
     paladin_v7_hedge_timeout_seconds: float = 90.0
     paladin_v7_forced_hedge_max_book_sum: float = 1.30
     paladin_v7_refill_clip_fraction: float = 0.5
@@ -447,6 +451,12 @@ class BotConfig:
             paladin_v7_first_leg_max_pm=min(0.99, max(0.01, _env_float("BOT_PALADIN_V7_FIRST_LEG_MAX_PM", 0.62))),
             paladin_v7_cheap_other_margin=max(0.0, _env_float("BOT_PALADIN_V7_CHEAP_OTHER_MARGIN", 0.04)),
             paladin_v7_cheap_pair_sum_max=min(1.0, _env_float("BOT_PALADIN_V7_CHEAP_PAIR_SUM_MAX", 0.99)),
+            paladin_v7_cheap_hedge_slip_buffer=max(
+                0.0, min(0.05, _env_float("BOT_PALADIN_V7_CHEAP_HEDGE_SLIP_BUFFER", 0.012))
+            ),
+            paladin_v7_cheap_hedge_min_delay_sec=max(
+                0.0, _env_float("BOT_PALADIN_V7_CHEAP_HEDGE_MIN_DELAY_SEC", 0.0)
+            ),
             paladin_v7_hedge_timeout_seconds=max(1.0, _env_float("BOT_PALADIN_V7_HEDGE_TIMEOUT_SEC", 90.0)),
             paladin_v7_forced_hedge_max_book_sum=min(
                 1.50, max(1.0, _env_float("BOT_PALADIN_V7_FORCED_HEDGE_SUM_MAX", 1.30))

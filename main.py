@@ -55,6 +55,12 @@ def main() -> int:
             int(config.paladin_v7_volume_lookback_sec),
             float(config.paladin_v7_btc_abs_move_min_usd),
         )
+        LOGGER.info(
+            "paladin_v7 hedge = cheap_min_delay=%.1fs (0=immediate when gate passes) | hedge_timeout=%.1fs (max age → forced) | slip_buf=%.4f",
+            float(config.paladin_v7_cheap_hedge_min_delay_sec),
+            float(config.paladin_v7_hedge_timeout_seconds),
+            float(config.paladin_v7_cheap_hedge_slip_buffer),
+        )
     elif config.strategy_mode == "paladin":
         LOGGER.info("strategy_id  = %s", "PALADIN_pair_live_v4")
         LOGGER.info("poly_ws      = %s (%s)", config.polymarket_ws_enabled, config.polymarket_ws_url)

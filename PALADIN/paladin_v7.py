@@ -5,9 +5,12 @@ PALADIN v7 (sim): Binance per-second volume spike + BTC price impulse → Polyma
 1) **First leg** when (rolling Binance base-volume vs lookback mean) spikes *and* BTC price moves
    in the same second; side = momentum (price up → UP token, down → DOWN token).
 2) **Second leg** (hedge) on the opposite outcome token: prefer a *cheap* fill when
-   **first-leg VWAP + current opposite mid** <= ``min(cheap_pair_sum_max, 1 - cheap_other_margin)``
-   (held + quote for the hedge leg — not live ``pm_u+pm_d``, which sits ~1.0). If still open after
-   ``hedge_timeout_seconds``, force hedge when pm_up+pm_down <= ``forced_hedge_max_book_sum``.
+   **first-leg VWAP + current opposite mid (+ slip buffer)** <= ``min(cheap_pair_sum_max, 1 - cheap_other_margin)``
+   (held + quote for the hedge leg — not live ``pm_u+pm_d``, which sits ~1.0). Cheap hedge may fire on the
+   **next** second as soon as that gate passes — ``hedge_timeout_seconds`` is **not** a minimum gap between
+   legs; it is the **maximum** age before a **forced** hedge when pm_up+pm_down <= ``forced_hedge_max_book_sum``.
+   Optional ``cheap_hedge_min_delay_sec`` enforces a minimum wait before allowing a cheap hedge (forced path
+   unchanged).
 3) **Refill** after a balanced pair: smaller clip (>= min_shares) when both mids are below
    leg averages (symmetric improvement), and book sum is tight enough.
 
@@ -54,6 +57,12 @@ class PaladinV7Params:
     first_leg_max_pm: float = 0.62
     cheap_other_margin: float = 0.04
     cheap_pair_sum_max: float = 0.99
+    # Live FAK often walks the book above the WS mid used for gating; require headroom so
+    # avg_first + (mid_opposite + buffer) <= cheap cap (avoids approving hedges that fill >1 pair avg).
+    cheap_hedge_slip_buffer: float = 0.012
+    # Do not allow ok_cheap until first-leg age >= this (seconds since first leg). 0 = legacy: hedge as soon
+    # as the cheap gate passes. Forced hedge at hedge_timeout_seconds is unaffected.
+    cheap_hedge_min_delay_sec: float = 0.0
     hedge_timeout_seconds: float = 90.0
     forced_hedge_max_book_sum: float = 1.30
 
@@ -171,6 +180,17 @@ def _price_jump(ticks: list[WindowTick], t: int, p: PaladinV7Params) -> bool:
     return abs(ticks[t].btc_px - prev) >= float(p.btc_abs_move_min_usd)
 
 
+def _n_fills_for_order_budget(st: SimState) -> int:
+    """Count trades toward ``max_orders``; omit API/reconcile bookkeeping rows."""
+    n = 0
+    for tr in st.trades:
+        r = str(tr.reason)
+        if "v7_api_reconcile_sync" in r or "v7_post_fak_api_sync" in r:
+            continue
+        n += 1
+    return n
+
+
 def _clamp_shares(st: SimState, side: Side, sh: float, cap: float, min_sh: float) -> float:
     cur = st.size_up if side == "up" else st.size_down
     room = float(cap) - cur
@@ -194,7 +214,7 @@ def paladin_v7_step(
     buy: Any = try_buy_fn if try_buy_fn is not None else try_buy
     min_sh = float(p.min_shares)
     mo = int(p.max_orders)
-    n_tr = len(st.trades)
+    n_tr = _n_fills_for_order_budget(st)
 
     # --- Pending hedge (second leg on *other* side) ---
     if runner.pending_second is not None:
@@ -203,11 +223,13 @@ def paladin_v7_step(
         age = float(t) - float(t0)
         forced = age + 1e-9 >= float(p.hedge_timeout_seconds)
 
-        # Non-forced: held first-leg VWAP + this tick's opposite mid (same anchor as FAK px).
-        # Tightest of book cap and (1 - margin) keeps sub-$1 pair discipline without gating on pm_u+pm_d.
-        pair_held_quote_sum = float(avg_first) + float(px_o)
+        # Non-forced: held first-leg VWAP + conservative opposite quote (mid + slip buffer).
+        # FAK fills can print above the mid used as the limit anchor; buffer aligns gate with live VWAP.
+        slip = max(0.0, float(p.cheap_hedge_slip_buffer))
+        pair_held_quote_sum = float(avg_first) + float(px_o) + slip
         cap = min(float(p.cheap_pair_sum_max), 1.0 - float(p.cheap_other_margin))
-        ok_cheap = pair_held_quote_sum + 1e-9 <= cap
+        min_cheap_age = max(0.0, float(p.cheap_hedge_min_delay_sec))
+        ok_cheap = (age + 1e-9 >= min_cheap_age) and (pair_held_quote_sum + 1e-9 <= cap)
 
         ok_forced = forced and (pm_u + pm_d) + 1e-9 <= float(p.forced_hedge_max_book_sum)
 
@@ -259,8 +281,9 @@ def paladin_v7_step(
             sh_u >= min_sh - 1e-9
             and sh_d >= min_sh - 1e-9
             and (pm_u + pm_d) + 1e-9 <= float(p.refill_max_pair_sum)
-            and pm_u + 1e-9 < st.avg_up
-            and pm_d + 1e-9 < st.avg_down
+            # Allow mids at leg VWAP (strict < blocked many refills right after a tight hedge).
+            and pm_u <= st.avg_up + 1e-8
+            and pm_d <= st.avg_down + 1e-8
             and improves_leg(st.size_up, st.avg_up, pm_u, sh_u)
             and improves_leg(st.size_down, st.avg_down, pm_d, sh_d)
         ):
