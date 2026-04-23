@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+ARG HOSTINGER_IMAGE_TAG=kng-bot3-paladin-v7-2026-04-23
+LABEL org.opencontainers.image.title="kng_bot3 Hostinger bot" \
+      org.opencontainers.image.version="${HOSTINGER_IMAGE_TAG}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
