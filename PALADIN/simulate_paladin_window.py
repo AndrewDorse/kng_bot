@@ -284,20 +284,37 @@ def try_buy(
     budget: float,
     min_notional: float,
     min_shares: float = 5.0,
+    pm_u: float | None = None,
+    pm_d: float | None = None,
 ) -> float:
-    """Simulated full fill. Returns matched shares, or 0.0 if rejected."""
-    px = round(px, 4)
-    notion = shares * px
+    """Simulated fill at second ``t``.
+
+    When ``pm_u`` and ``pm_d`` are provided (PALADIN v7/v9 second sim), a **limit buy** at ``px`` fills
+    only if the recorded mid for that side is at or below the limit (``m <= px``). Fill price is
+    ``min(px, m)`` (price improvement when the tape is cheaper). When mids are omitted, legacy
+    behavior: instant full fill at ``px`` (callers that do not model a tape).
+    """
+    limit_px = round(float(px), 4)
+    if pm_u is not None and pm_d is not None:
+        m = float(pm_u) if side == "up" else float(pm_d)
+        if m > limit_px + 1e-9:
+            return 0.0
+        fill_px = round(min(limit_px, m), 4)
+    else:
+        fill_px = limit_px
+    notion = shares * fill_px
     if shares < min_shares - 1e-9:
         return 0.0
     if notion < min_notional - 1e-9:
         return 0.0
     if not can_afford(st.spent_usdc, notion, budget):
         return 0.0
-    su, au, sd, ad = apply_buy_fill(st.size_up, st.avg_up, st.size_down, st.avg_down, side=side, add_shares=shares, fill_price=px)
+    su, au, sd, ad = apply_buy_fill(
+        st.size_up, st.avg_up, st.size_down, st.avg_down, side=side, add_shares=shares, fill_price=fill_px
+    )
     st.size_up, st.avg_up, st.size_down, st.avg_down = su, au, sd, ad
     st.spent_usdc += notion
-    st.trades.append(Trade(t, side, shares, px, notion, reason))
+    st.trades.append(Trade(t, side, shares, fill_px, notion, reason))
     return float(shares)
 
 

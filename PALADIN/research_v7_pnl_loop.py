@@ -123,6 +123,8 @@ def try_buy_core_profit_lock(
     budget: float,
     min_notional: float,
     min_shares: float,
+    pm_u: float | None = None,
+    pm_d: float | None = None,
 ) -> float:
     """STRATEGY_CORE: stop first/layer-2 adds when fully profitable; hedges always allowed."""
     snap = st.snapshot_metrics()
@@ -134,10 +136,27 @@ def try_buy_core_profit_lock(
     pd = float(snap["pnl_if_down_usdc"])
     roi_lock = su >= 19.5 and sd >= 19.5 and ru >= 0.10 and rd >= 0.10
     dollar_lock = su >= 19.5 and sd >= 19.5 and pu >= 5.0 and pd >= 5.0
-    if (roi_lock or dollar_lock) and reason in ("v7_first_binance_spike", "v7_layer2_dip_lead"):
+    if (roi_lock or dollar_lock) and reason in (
+        "v7_first_binance_spike",
+        "v7_layer2_dip_lead",
+        "v7_layer2_lowvwap_dip",
+        "v7_imbalance_repair",
+    ):
         return 0.0
     return float(
-        try_buy(st, t=t, side=side, shares=shares, px=px, reason=reason, budget=budget, min_notional=min_notional, min_shares=min_shares)
+        try_buy(
+            st,
+            t=t,
+            side=side,
+            shares=shares,
+            px=px,
+            reason=reason,
+            budget=budget,
+            min_notional=min_notional,
+            min_shares=min_shares,
+            pm_u=pm_u,
+            pm_d=pm_d,
+        )
     )
 
 
@@ -152,11 +171,25 @@ def try_buy_skip_refill(
     budget: float,
     min_notional: float,
     min_shares: float,
+    pm_u: float | None = None,
+    pm_d: float | None = None,
 ) -> float:
-    if reason in ("v7_layer2_dip_lead",):
+    if reason in ("v7_layer2_dip_lead", "v7_layer2_lowvwap_dip", "v7_imbalance_repair"):
         return 0.0
     return float(
-        try_buy(st, t=t, side=side, shares=shares, px=px, reason=reason, budget=budget, min_notional=min_notional, min_shares=min_shares)
+        try_buy(
+            st,
+            t=t,
+            side=side,
+            shares=shares,
+            px=px,
+            reason=reason,
+            budget=budget,
+            min_notional=min_notional,
+            min_shares=min_shares,
+            pm_u=pm_u,
+            pm_d=pm_d,
+        )
     )
 
 
@@ -171,11 +204,23 @@ def try_buy_profit_lock_no_refill(
     budget: float,
     min_notional: float,
     min_shares: float,
+    pm_u: float | None = None,
+    pm_d: float | None = None,
 ) -> float:
-    if reason in ("v7_layer2_dip_lead",):
+    if reason in ("v7_layer2_dip_lead", "v7_layer2_lowvwap_dip", "v7_imbalance_repair"):
         return 0.0
     return try_buy_core_profit_lock(
-        st, t=t, side=side, shares=shares, px=px, reason=reason, budget=budget, min_notional=min_notional, min_shares=min_shares
+        st,
+        t=t,
+        side=side,
+        shares=shares,
+        px=px,
+        reason=reason,
+        budget=budget,
+        min_notional=min_notional,
+        min_shares=min_shares,
+        pm_u=pm_u,
+        pm_d=pm_d,
     )
 
 
@@ -191,6 +236,8 @@ def try_buy_slip_pct(pct: float) -> TryBuyFn:
         budget: float,
         min_notional: float,
         min_shares: float,
+        pm_u: float | None = None,
+        pm_d: float | None = None,
     ) -> float:
         sh2 = max(0.0, float(shares) * (1.0 - pct))
         if sh2 + 1e-9 < min_shares:
@@ -206,6 +253,8 @@ def try_buy_slip_pct(pct: float) -> TryBuyFn:
                 budget=budget,
                 min_notional=min_notional,
                 min_shares=min_shares,
+                pm_u=pm_u,
+                pm_d=pm_d,
             )
         )
 
