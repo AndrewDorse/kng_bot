@@ -71,9 +71,14 @@ class GammaMarketLocator:
         now_ts = int(now.timestamp())
         window_size = self.config.window_size_seconds
         current_start = (now_ts // window_size) * window_size
-        seconds_in = now_ts - current_start
-        grace = max(0, self.config.window_pick_current_grace_seconds)
-        target_start = current_start if seconds_in < grace else current_start + window_size
+        # Always pick the slug for the window epoch that *contains* ``now`` (floor to window_size).
+        #
+        # Older logic used ``window_pick_current_grace_seconds``: after ``grace`` seconds inside the
+        # epoch it requested ``current_start + window_size`` (the *next* Gamma slug). That runs for
+        # ~10 minutes of every 15m block while the *current* market is still live — the bot then
+        # "moved to the next window" mid-period, reset strategy state, and sat in pre-window while
+        # positions stayed on the previous contract.
+        target_start = current_start
 
         slug = f"{self.config.market_slug_prefix}-{target_start}"
         resp = self.session.get(

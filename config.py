@@ -111,6 +111,7 @@ class BotConfig:
     hedge_offset: float = 0.02
     market_symbol: str = "BTC"
     window_minutes: int = 15
+    # Unused by ``GammaMarketLocator`` (kept for env compatibility): old grace flipped to next slug mid-window.
     window_pick_current_grace_seconds: int = 300
     trade_one_window: bool = False
     strategy_budget_cap_usdc: float = 80.0
