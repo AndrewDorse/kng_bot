@@ -46,6 +46,8 @@ from simulate_paladin_window import SimState, Trade, try_buy as sim_try_buy  # n
 # Hard ceiling for any *single* CLOB BUY this engine posts for PALADIN v7 (spike, hedge, flatten).
 # Config may mis-read; API fallbacks may spike — this value is never exceeded for order size / adds.
 V7_LIVE_MAX_SHARES_PER_SINGLE_ORDER = 5
+# Polymarket rejects sub-$1 notional on many BUY posts ("invalid amount ... min size: $1").
+POLYMARKET_MIN_BUY_NOTIONAL_USD = 1.0
 
 
 def _can_afford_live(spent: float, add: float, budget: float) -> bool:
@@ -432,17 +434,9 @@ class PaladinV7LiveEngine:
         return int(min(V7_LIVE_MAX_SHARES_PER_SINGLE_ORDER, raw))
 
     def _clip_cap_for_reason(self, reason: str) -> int:
-        fixed_clip_reasons = {
-            "v7_first_window_lead",
-            "v7_first_binance_spike",
-            "v7_balanced_btc_spike",
-            "v7_layer2_dip_lead",
-            "v7_layer2_lowvwap_dip",
-            "v7_hedge_cheap",
-            "v7_hedge_forced",
-            "v7_api_imbalance_flatten",
-        }
-        return self._v7_max_single_buy_shares() if str(reason) in fixed_clip_reasons else 10**9
+        """Never post an uncapped share count live (exchange/API bugs have produced 60+ single orders)."""
+        _ = reason
+        return self._v7_max_single_buy_shares()
 
     def _cap_requested_live_size(self, shares: float, reason: str) -> int:
         raw_size = max(0, int(round(float(shares))))
@@ -761,7 +755,7 @@ class PaladinV7LiveEngine:
             )
         )
         LOGGER.info(
-            "PALADIN v7 LIMIT filled %s %.4f sh @ %.4f ($%.2f) | %s | oid=%s",
+            "PALADIN v7 BUY filled %s %.4f sh @ %.4f ($%.2f) | %s | oid=%s",
             side.upper(),
             filled,
             avg_px,
@@ -788,8 +782,6 @@ class PaladinV7LiveEngine:
         tape_pm_u: float | None = None,
         tape_pm_d: float | None = None,
     ) -> float:
-        px = float(px)
-        px = round(px, 4)
         now = time.time()
         if self._has_unresolved_active_limit_order(now):
             LOGGER.warning("PALADIN v7 refusing new %s order while tracked order is still unresolved", reason)
@@ -803,18 +795,24 @@ class PaladinV7LiveEngine:
         if size <= 0 or size < max(exchange_min_shares, int(math.ceil(min_shares))):
             return 0.0
         req_shares = float(size)
+        px = float(px)
+        px = round(px, 4)
+        eff_min_notional = max(float(min_notional), float(POLYMARKET_MIN_BUY_NOTIONAL_USD))
+        if req_shares * px + 1e-9 < eff_min_notional:
+            px = min(0.99, max(float(px), eff_min_notional / max(float(req_shares), 1e-9)))
+            px = round(px, 4)
         notion = req_shares * px
-        if req_shares < min_shares - 1e-9 or notion < min_notional - 1e-9:
+        if req_shares < min_shares - 1e-9 or notion < eff_min_notional - 1e-9:
             LOGGER.info(
                 "PALADIN v7 skip BUY %s shares=%.4f px=%.4f notion=$%.2f reason=%s "
-                "(min_shares=%.4f min_notional=%.2f)",
+                "(min_shares=%.4f eff_min_notional=%.2f)",
                 side.upper(),
                 req_shares,
                 px,
                 notion,
                 reason,
                 min_shares,
-                min_notional,
+                eff_min_notional,
             )
             return 0.0
         tok = contract.up if side == "up" else contract.down
@@ -862,15 +860,17 @@ class PaladinV7LiveEngine:
                 return 0.0
             filled = max(0.0, float(getattr(res, "filled_shares", 0.0) or 0.0))
             order_id = str(getattr(res, "order_id", "") or "")
-            if filled <= 1e-9:
-                try:
-                    api_after = float(self.trader.token_balance_allowance_refreshed(tok.token_id))
-                except Exception as exc:
-                    LOGGER.debug("PALADIN v7 market post-buy balance read skipped: %s", exc)
-                    api_after = api_before
+            try:
+                api_after = float(self.trader.token_balance_allowance_refreshed(tok.token_id))
+            except Exception as exc:
+                LOGGER.debug("PALADIN v7 market post-buy balance read skipped: %s", exc)
+                api_after = api_before
             delta_api = max(0.0, api_after - api_before)
-            if delta_api > max(1e-9, float(self.config.paladin_v7_reconcile_share_tolerance)):
+            tol = max(1e-9, float(self.config.paladin_v7_reconcile_share_tolerance))
+            if delta_api > tol:
                 filled = min(delta_api, float(req_shares))
+            else:
+                filled = min(filled, float(req_shares))
             filled = self._cap_confirmed_fill(filled, req_shares, reason, order_id)
             if filled <= 1e-9:
                 return 0.0
@@ -1173,7 +1173,9 @@ class PaladinV7LiveEngine:
                 continue
             if delta > 0:
                 mx = float(self._v7_max_single_buy_shares())
-                if delta > mx + 1e-6:
+                # When the model leg is already non-zero, cap big positive API deltas (stale burst).
+                # When the model starts at ~0, apply the full API position in one reconcile (avoids +5/slice drift).
+                if cur > 1e-9 and delta > mx + 1e-6:
                     LOGGER.warning(
                         "PALADIN v7 reconcile: capping positive %s add %.4f -> %.4f (API vs model)",
                         side,
@@ -1484,6 +1486,20 @@ class PaladinV7LiveEngine:
             LOGGER.info("PALADIN v7 live: new window %s", slug)
             if self._ws is not None:
                 self._ws.set_assets([contract.up.token_id, contract.down.token_id])
+            try:
+                api_u0 = float(self.trader.token_balance_allowance_refreshed(contract.up.token_id))
+                api_d0 = float(self.trader.token_balance_allowance_refreshed(contract.down.token_id))
+                if api_u0 > 1e-6 or api_d0 > 1e-6:
+                    self._sync_state_to_api_balances(self._runner, api_u0, api_d0, 0.5, 0.5, 0)
+                    self._resync_pending_second_after_reconcile(self._runner, 0)
+                    LOGGER.info(
+                        "PALADIN v7 live: new-window model seeded from API (UP=%.4f DN=%.4f) pending=%s",
+                        api_u0,
+                        api_d0,
+                        self._runner.pending_second,
+                    )
+            except Exception as exc:
+                LOGGER.warning("PALADIN v7 new-window API inventory bootstrap skipped: %s", exc)
 
         assert self._runner is not None
         runner = self._runner

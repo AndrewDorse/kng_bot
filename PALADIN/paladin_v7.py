@@ -367,7 +367,12 @@ def paladin_v7_step(
                 hedge_mn = float(p.min_notional)
                 # Once timeout hits, force must take precedence over the resting cheap path.
                 px_exec = px_o if ok_forced else float(cheap_limit_px)
-                if sh_exec * px_exec + 1e-9 < hedge_mn:
+                # Polymarket rejects sub-$1 notional on many BUY paths; lift px so the clip clears ~$1.
+                notion_floor = max(float(hedge_mn), 1.0)
+                need_px = notion_floor / max(float(sh_exec), 1e-9)
+                if float(px_exec) * float(sh_exec) + 1e-9 < notion_floor:
+                    px_exec = min(0.99, max(float(px_exec), float(need_px)))
+                if sh_exec * float(px_exec) + 1e-9 < notion_floor:
                     return
                 reason = "v7_hedge_forced" if ok_forced else "v7_hedge_cheap"
                 filled = buy(
