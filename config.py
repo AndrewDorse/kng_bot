@@ -333,7 +333,7 @@ class BotConfig:
         cfg = cls(
             private_key=private_key.strip(),
             funder=funder,
-            bot_version=os.getenv("BOT_VERSION", "paladin-v7-binance-spike-2026-04-21").strip(),
+            bot_version=os.getenv("BOT_VERSION", "paladin-v9-kng3-2026-04-25").strip(),
             signature_type=_env_int("POLY_SIGNATURE_TYPE", 1),
             relayer_api_key=os.getenv("RELAYER_API_KEY", ""),
             relayer_secret=os.getenv("RELAYER_SECRET", ""),
