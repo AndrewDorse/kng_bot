@@ -75,6 +75,8 @@ def _normalize_strategy_mode(raw: str | None) -> str:
         return "paladin"
     if s in ("paladin_v7", "paladin7", "paladin_v7_live", "kng3", "kng3_live"):
         return "paladin_v7"
+    if s in ("paladin_v9", "paladin9", "paladin_v9_live", "kng3_v9", "v9_live"):
+        return "paladin_v9"
     if s in ("iy2", "iy_2", "wallet_overlap", "wallet_overlap_live", "iy2_live"):
         return "iy2"
     if s in ("iy3", "iy_3", "wallet_overlap_path", "wallet_overlap_path_live", "iy3_live"):
@@ -137,7 +139,7 @@ class BotConfig:
     btc_feed_poll_seconds: float = 1.0
     btc_feed_symbol: str = "BTCUSDT"
     signal_preset: str = "w1"
-    # paladin | paladin_v7 | champ4_6s | iy2 | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
+    # paladin | paladin_v7 | paladin_v9 | champ4_6s | iy2 | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
     strategy_mode: str = "paladin_v7"
     # volume scalp: fixed-lot directional entries with one shared TP per held side plus stop/time-exit risk control.
     volume_scalp_tp_offset: float = 0.12
@@ -218,6 +220,11 @@ class BotConfig:
     paladin_v7_volume_floor: float = 1e-6
     paladin_v7_btc_abs_move_min_usd: float = 2.0
     paladin_v7_first_leg_max_pm: float = 0.62
+    # Balanced re-entry spike buys are ignored outside this PM band.
+    paladin_v7_balanced_entry_min_pm: float = 0.20
+    paladin_v7_balanced_entry_max_pm: float = 0.80
+    # Extra price buffer for marketable BTC-spike entries so they cross reliably when the book moves fast.
+    paladin_v7_spike_market_price_buffer: float = 0.02
     paladin_v7_cheap_other_margin: float = 0.04
     paladin_v7_cheap_pair_sum_max: float = 0.99
     # Max *our* pair cost: cheap hedge held VWAP + opposite + slip (not raw pm_u+pm_d).
@@ -226,21 +233,41 @@ class BotConfig:
     paladin_v7_cheap_hedge_slip_buffer: float = 0.012
     # Seconds after first leg before a *cheap* hedge may execute (0 = immediate when gate passes).
     paladin_v7_cheap_hedge_min_delay_sec: float = 0.0
-    paladin_v7_hedge_timeout_seconds: float = 90.0
+    paladin_v7_hedge_timeout_seconds: float = 30.0
     paladin_v7_forced_hedge_max_book_sum: float = 1.30
-    paladin_v7_pair_cooldown_sec: float = 20.0
+    # Legacy layer-entry cooldown kept on config; spike-only mode no longer uses a non-spike layer path.
+    paladin_v7_layer2_cooldown_sec: float = 5.0
+    # After each completed pair: min wait before the next BTC-spike entry when the book is balanced.
+    paladin_v7_pair_cooldown_sec: float = 5.0
     # First leg, layer-2 dip add, and hedge clip (BOT_PALADIN_V7_BASE_ORDER_SHARES; legacy BOT_PALADIN_V7_CLIP_SHARES).
     paladin_v7_base_order_shares: float = 5.0
-    paladin_v7_max_shares_per_side: float = 10.0
-    # Layer 2: lead-side mid must be <= that leg's avg minus this (e.g. 0.05 = 5c dip).
+    paladin_v7_max_shares_per_side: float = 25.0
+    # Legacy higher-VWAP dip threshold kept on config; spike-only mode no longer uses it for entries.
     paladin_v7_layer2_dip_below_avg: float = 0.05
+    # Hedge-price cap starts at 1 - this deduction, then tightens by layer_level_offset_step per layer.
+    paladin_v7_cheap_balance_start_deduction: float = 0.08
+    # Legacy layer tightening knob kept on config; spike-only mode no longer uses it for entries.
+    paladin_v7_layer_level_offset_step: float = 0.01
+    # Legacy lower-VWAP deep-dip threshold kept on config; spike-only mode no longer uses it for entries.
+    paladin_v7_layer2_low_vwap_dip_below_avg: float = 0.20
+    # Legacy layer cutoff kept on config; spike-only mode no longer uses a non-spike layer path.
+    paladin_v7_no_new_layers_last_seconds: float = 60.0
+    # |up−down| <= this (shares) counts as balanced for spike re-entry checks (default 1.0).
+    paladin_v7_balance_share_tolerance: float = 1.0
+    # Imbalance repair: buy lighter side when pm_light + VWAP(heavy) < this (default 0.97).
+    paladin_v7_imbalance_repair_max_pair_sum: float = 0.97
     paladin_v7_min_notional: float = 1.0
     paladin_v7_min_shares: float = 5.0
+    paladin_v7_limit_order_cancel_seconds: float = 5.0
     # Live: poll CLOB conditional balances vs SimState; debounce to tolerate API delay.
     paladin_v7_reconcile_enabled: bool = True
     paladin_v7_reconcile_interval_seconds: float = 5.0
     paladin_v7_reconcile_share_tolerance: float = 0.35
     paladin_v7_reconcile_confirm_reads: int = 2
+    # Extra safety: when the model says "balanced" but API keeps reporting imbalance, trust API only after
+    # repeated stable reads so one stale allowance response cannot trigger unnecessary hedge churn.
+    paladin_v7_api_reality_confirm_reads: int = 5
+    paladin_v7_api_reality_confirm_interval_seconds: float = 2.0
     paladin_v7_reconcile_flatten: bool = True
     paladin_v7_reconcile_flatten_min_imbalance: float = 0.25
     paladin_v7_reconcile_flatten_cooldown_seconds: float = 10.0
@@ -297,9 +324,13 @@ class BotConfig:
             perp15_ladder = [0.44, 0.43, 0.40]
 
         raw_mode = _normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "paladin_v7"))
-        default_strategy_budget = 10.0 if raw_mode == "paladin_v7" else 80.0
+        default_strategy_budget = (
+            400.0
+            if raw_mode == "paladin_v9"
+            else (10.0 if raw_mode == "paladin_v7" else 80.0)
+        )
 
-        return cls(
+        cfg = cls(
             private_key=private_key.strip(),
             funder=funder,
             bot_version=os.getenv("BOT_VERSION", "paladin-v7-binance-spike-2026-04-21").strip(),
@@ -451,6 +482,15 @@ class BotConfig:
             paladin_v7_volume_floor=max(0.0, _env_float("BOT_PALADIN_V7_VOL_FLOOR", 1e-6)),
             paladin_v7_btc_abs_move_min_usd=max(0.0, _env_float("BOT_PALADIN_V7_BTC_MOVE_MIN_USD", 2.0)),
             paladin_v7_first_leg_max_pm=min(0.99, max(0.01, _env_float("BOT_PALADIN_V7_FIRST_LEG_MAX_PM", 0.62))),
+            paladin_v7_balanced_entry_min_pm=min(
+                0.99, max(0.01, _env_float("BOT_PALADIN_V7_BALANCED_ENTRY_MIN_PM", 0.20))
+            ),
+            paladin_v7_balanced_entry_max_pm=min(
+                0.99, max(0.01, _env_float("BOT_PALADIN_V7_BALANCED_ENTRY_MAX_PM", 0.80))
+            ),
+            paladin_v7_spike_market_price_buffer=max(
+                0.0, min(0.05, _env_float("BOT_PALADIN_V7_SPIKE_MARKET_PRICE_BUFFER", 0.02))
+            ),
             paladin_v7_cheap_other_margin=max(0.0, _env_float("BOT_PALADIN_V7_CHEAP_OTHER_MARGIN", 0.04)),
             paladin_v7_cheap_pair_sum_max=min(1.0, _env_float("BOT_PALADIN_V7_CHEAP_PAIR_SUM_MAX", 0.99)),
             paladin_v7_cheap_pair_avg_sum_nonforced_max=min(
@@ -463,22 +503,48 @@ class BotConfig:
             paladin_v7_cheap_hedge_min_delay_sec=max(
                 0.0, _env_float("BOT_PALADIN_V7_CHEAP_HEDGE_MIN_DELAY_SEC", 0.0)
             ),
-            paladin_v7_hedge_timeout_seconds=max(1.0, _env_float("BOT_PALADIN_V7_HEDGE_TIMEOUT_SEC", 90.0)),
+            paladin_v7_hedge_timeout_seconds=max(1.0, _env_float("BOT_PALADIN_V7_HEDGE_TIMEOUT_SEC", 30.0)),
             paladin_v7_forced_hedge_max_book_sum=min(
                 1.50, max(1.0, _env_float("BOT_PALADIN_V7_FORCED_HEDGE_SUM_MAX", 1.30))
             ),
-            paladin_v7_pair_cooldown_sec=max(0.0, _env_float("BOT_PALADIN_V7_PAIR_COOLDOWN_SEC", 20.0)),
+            paladin_v7_layer2_cooldown_sec=max(
+                5.0, min(300.0, _env_float("BOT_PALADIN_V7_LAYER2_COOLDOWN_SEC", 5.0))
+            ),
+            paladin_v7_pair_cooldown_sec=max(
+                5.0, min(300.0, _env_float("BOT_PALADIN_V7_PAIR_COOLDOWN_SEC", 5.0))
+            ),
             paladin_v7_base_order_shares=(
                 max(1.0, _env_float("BOT_PALADIN_V7_BASE_ORDER_SHARES", 5.0))
                 if (os.getenv("BOT_PALADIN_V7_BASE_ORDER_SHARES") or "").strip()
                 else max(1.0, _env_float("BOT_PALADIN_V7_CLIP_SHARES", 5.0))
             ),
-            paladin_v7_max_shares_per_side=max(1.0, _env_float("BOT_PALADIN_V7_MAX_SHARES_PER_SIDE", 10.0)),
+            paladin_v7_max_shares_per_side=max(1.0, _env_float("BOT_PALADIN_V7_MAX_SHARES_PER_SIDE", 25.0)),
             paladin_v7_layer2_dip_below_avg=max(
                 0.0, min(0.5, _env_float("BOT_PALADIN_V7_LAYER2_DIP_BELOW_AVG", 0.05))
             ),
+            paladin_v7_cheap_balance_start_deduction=max(
+                0.0, min(0.5, _env_float("BOT_PALADIN_V7_CHEAP_BALANCE_START_DEDUCTION", 0.08))
+            ),
+            paladin_v7_layer_level_offset_step=max(
+                0.0, min(0.1, _env_float("BOT_PALADIN_V7_LAYER_LEVEL_OFFSET_STEP", 0.01))
+            ),
+            paladin_v7_layer2_low_vwap_dip_below_avg=max(
+                0.0, min(0.95, _env_float("BOT_PALADIN_V7_LAYER2_LOW_VWAP_DIP_BELOW_AVG", 0.20))
+            ),
+            paladin_v7_no_new_layers_last_seconds=max(
+                0.0, min(300.0, _env_float("BOT_PALADIN_V7_NO_NEW_LAYERS_LAST_SEC", 60.0))
+            ),
+            paladin_v7_balance_share_tolerance=max(
+                0.0, min(50.0, _env_float("BOT_PALADIN_V7_BALANCE_SHARE_TOLERANCE", 1.0))
+            ),
+            paladin_v7_imbalance_repair_max_pair_sum=max(
+                0.5, min(1.0, _env_float("BOT_PALADIN_V7_IMBALANCE_REPAIR_MAX_PAIR_SUM", 0.97))
+            ),
             paladin_v7_min_notional=max(0.01, _env_float("BOT_PALADIN_V7_MIN_NOTIONAL", 1.0)),
             paladin_v7_min_shares=max(1.0, _env_float("BOT_PALADIN_V7_MIN_SHARES", 5.0)),
+            paladin_v7_limit_order_cancel_seconds=max(
+                1.0, _env_float("BOT_PALADIN_V7_LIMIT_ORDER_CANCEL_SEC", 5.0)
+            ),
             paladin_v7_reconcile_enabled=_env_bool("BOT_PALADIN_V7_RECONCILE_ENABLED", True),
             paladin_v7_reconcile_interval_seconds=max(
                 2.0, _env_float("BOT_PALADIN_V7_RECONCILE_INTERVAL_SEC", 5.0)
@@ -487,6 +553,12 @@ class BotConfig:
                 0.05, _env_float("BOT_PALADIN_V7_RECONCILE_SHARE_TOL", 0.35)
             ),
             paladin_v7_reconcile_confirm_reads=max(1, _env_int("BOT_PALADIN_V7_RECONCILE_CONFIRM_READS", 2)),
+            paladin_v7_api_reality_confirm_reads=max(
+                1, _env_int("BOT_PALADIN_V7_API_REALITY_CONFIRM_READS", 5)
+            ),
+            paladin_v7_api_reality_confirm_interval_seconds=max(
+                0.5, _env_float("BOT_PALADIN_V7_API_REALITY_CONFIRM_INTERVAL_SEC", 2.0)
+            ),
             paladin_v7_reconcile_flatten=_env_bool("BOT_PALADIN_V7_RECONCILE_FLATTEN", True),
             paladin_v7_reconcile_flatten_min_imbalance=max(
                 0.05, _env_float("BOT_PALADIN_V7_RECONCILE_FLATTEN_MIN_IMB", 0.25)
@@ -495,6 +567,15 @@ class BotConfig:
                 2.0, _env_float("BOT_PALADIN_V7_RECONCILE_FLATTEN_COOLDOWN_SEC", 10.0)
             ),
         )
+        if cfg.strategy_mode in ("paladin_v7", "paladin_v9") and (
+            cfg.strategy_budget_cap_usdc + 1e-9 < cfg.strategy_min_budget_usdc
+        ):
+            raise BotConfigError(
+                f"BOT_STRATEGY_BUDGET_CAP_USDC ({cfg.strategy_budget_cap_usdc}) must be >= "
+                f"BOT_STRATEGY_MIN_BUDGET_USDC ({cfg.strategy_min_budget_usdc}) for strategy_mode="
+                f"{cfg.strategy_mode!r}"
+            )
+        return cfg
 
 
 # ---------------------------------------------------------------------------

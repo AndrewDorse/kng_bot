@@ -1,8 +1,8 @@
 # Sync **Docker runtime files only** from kng_bot3 into the KNG3 mirror checkout.
-# KNG3 is a minimal repo (root Dockerfile + v7-only main.py). Do NOT copy the full PALADIN
+# KNG3 is a minimal repo (root Dockerfile + slim main.py). Do NOT copy the full PALADIN
 # research tree — that breaks the image (missing modules / bloat).
 # **Do not sync root main.py** from kng_bot3: monolithic main contains substrings that fail
-# KNG3 Dockerfile guard and pulls optional engines; KNG3 keeps its own v7-only main.py.
+# KNG3 Dockerfile guard and pulls optional engines; KNG3 keeps its own paladin-only main.py.
 #
 # Paths: deploy/KNG3_MIRROR.txt — edit MIRROR_LOCAL_PATH if your mirror moves.
 #
@@ -42,6 +42,7 @@ $rootFiles = @(
     "polymarket_ws.py",
     "clob_fak.py",
     "paladin_v7_live_engine.py",
+    "paladin_v9_live_engine.py",
     "btc15_redeem_engine.py",
     "paladin_live_engine.py",
     "signal_analyzer.py"
