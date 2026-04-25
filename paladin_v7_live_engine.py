@@ -115,6 +115,8 @@ class PaladinV7LiveEngine:
         self.config = config
         self.locator = locator
         self.trader = trader
+        # Live log lines use this prefix so PaladinV9LiveEngine can show "PALADIN v9" (same code path).
+        self._paladin_live_log_prefix: str = "PALADIN v7"
         self._stop = False
         self._slug: str | None = None
         self._runner: PaladinV7Runner | None = None
@@ -178,7 +180,7 @@ class PaladinV7LiveEngine:
         signal.signal(signal.SIGINT, self._sig)
         signal.signal(signal.SIGTERM, self._sig)
         LOGGER.info(
-            "PALADIN v7 live started | dry_run=%s poll=%.1fs budget=$%.2f base_order=%.1f max/side=%.0f "
+            self._paladin_live_log_prefix + " live started | dry_run=%s poll=%.1fs budget=$%.2f base_order=%.1f max/side=%.0f "
             "layer2_hi_dip=%.3f layer2_lo_dip=%.3f bal_tol=%.2fsh layer2_cd=%.1fs imb_repair_pm+avg_heavy<%.3f pair_cd=%.0fs",
             self.config.dry_run,
             float(self.config.poll_interval_seconds),
@@ -193,7 +195,7 @@ class PaladinV7LiveEngine:
             float(self.config.paladin_v7_pair_cooldown_sec),
         )
         LOGGER.info(
-            "PALADIN v7 reconcile | enabled=%s every=%.1fs tol=%.2f sh confirm_reads=%d flatten=%s",
+            self._paladin_live_log_prefix + " reconcile | enabled=%s every=%.1fs tol=%.2f sh confirm_reads=%d flatten=%s",
             self.config.paladin_v7_reconcile_enabled,
             float(self.config.paladin_v7_reconcile_interval_seconds),
             float(self.config.paladin_v7_reconcile_share_tolerance),
@@ -201,12 +203,12 @@ class PaladinV7LiveEngine:
             self.config.paladin_v7_reconcile_flatten,
         )
         LOGGER.info(
-            "PALADIN v7 API reality override | balanced_probe=%d reads every %.1fs",
+            self._paladin_live_log_prefix + " API reality override | balanced_probe=%d reads every %.1fs",
             int(self.config.paladin_v7_api_reality_confirm_reads),
             float(self.config.paladin_v7_api_reality_confirm_interval_seconds),
         )
         LOGGER.info(
-            "PALADIN v7 order mode | spike_entry=market hedge_cheap=resting_limit forced_hedge=aggressive_limit "
+            self._paladin_live_log_prefix + " order mode | spike_entry=market hedge_cheap=resting_limit forced_hedge=aggressive_limit "
             "limit_cancel_after=%.1fs",
             float(self.config.paladin_v7_limit_order_cancel_seconds),
         )
@@ -220,7 +222,7 @@ class PaladinV7LiveEngine:
                 pass
 
     def _sig(self, *_args: object) -> None:
-        LOGGER.info("PALADIN v7 live: shutdown requested")
+        LOGGER.info(self._paladin_live_log_prefix + " live: shutdown requested")
         self._stop = True
 
     def _token_price(self, tm: TokenMarket) -> float | None:
@@ -331,7 +333,7 @@ class PaladinV7LiveEngine:
                 try:
                     order_state = self.trader.get_order(order_id)
                 except Exception as exc:
-                    LOGGER.debug("PALADIN v7 get_order %s during avg confirm: %s", order_id[:18], exc)
+                    LOGGER.debug(self._paladin_live_log_prefix + " get_order %s during avg confirm: %s", order_id[:18], exc)
                     continue
             raw_avg_px = self._raw_order_avg_price(order_state)
             confirmed_filled, _spent, _safe_avg_px, _status = self._buy_fill_from_order(order_state, fallback_px)
@@ -340,7 +342,7 @@ class PaladinV7LiveEngine:
             if raw_avg_px > fallback_px + 1e-6:
                 if not warned_bad_px:
                     LOGGER.warning(
-                        "PALADIN v7 ignoring suspicious order avg %.4f above limit %.4f | oid=%s",
+                        self._paladin_live_log_prefix + " ignoring suspicious order avg %.4f above limit %.4f | oid=%s",
                         raw_avg_px,
                         fallback_px,
                         order_id[:24] + "…",
@@ -350,7 +352,7 @@ class PaladinV7LiveEngine:
             if filled > 1e-9 and confirmed_filled + share_tol < filled:
                 if not warned_stale_size:
                     LOGGER.debug(
-                        "PALADIN v7 avg confirm waiting for fuller size %.4f/%.4f | oid=%s",
+                        self._paladin_live_log_prefix + " avg confirm waiting for fuller size %.4f/%.4f | oid=%s",
                         confirmed_filled,
                         filled,
                         order_id[:24] + "…",
@@ -454,7 +456,7 @@ class PaladinV7LiveEngine:
         if got <= req + 1e-6:
             return got
         LOGGER.warning(
-            "PALADIN v7 capping suspicious fill %.4f -> %.4f | %s | oid=%s",
+            self._paladin_live_log_prefix + " capping suspicious fill %.4f -> %.4f | %s | oid=%s",
             got,
             req,
             reason,
@@ -483,7 +485,7 @@ class PaladinV7LiveEngine:
         try:
             open_orders = self.trader.get_open_orders()
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 stray open-order check skipped: %s", exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " stray open-order check skipped: %s", exc)
             return False
         for od in open_orders:
             oid = str(od.get("id") or od.get("orderID") or od.get("order_id") or "")
@@ -500,7 +502,7 @@ class PaladinV7LiveEngine:
             if now - self._last_untracked_open_order_log_ts >= 5.0:
                 self._last_untracked_open_order_log_ts = now
                 LOGGER.warning(
-                    "PALADIN v7 blocking new buy: exchange still shows open order oid=%s token=%s side=%s",
+                    self._paladin_live_log_prefix + " blocking new buy: exchange still shows open order oid=%s token=%s side=%s",
                     oid[:24] + "…" if oid else "?",
                     tok[:16] + "…" if tok else "?",
                     side or "?",
@@ -519,7 +521,7 @@ class PaladinV7LiveEngine:
         try:
             order_state = self.trader.get_order(order_id)
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 active get_order %s: %s", order_id[:18], exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " active get_order %s: %s", order_id[:18], exc)
         status = ""
         filled = 0.0
         if order_state is not None:
@@ -538,7 +540,7 @@ class PaladinV7LiveEngine:
         try:
             open_orders = self.trader.get_open_orders()
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 active get_open_orders %s: %s", order_id[:18], exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " active get_open_orders %s: %s", order_id[:18], exc)
             self._limit_order_busy_until_ts = max(self._limit_order_busy_until_ts, now + 1.0)
             return True
         for od in open_orders:
@@ -553,7 +555,7 @@ class PaladinV7LiveEngine:
             return True
         if not self._active_limit_order_cancel_requested:
             LOGGER.warning(
-                "PALADIN v7 order %s missing from checks before cancel confirmation; holding new orders | %s",
+                self._paladin_live_log_prefix + " order %s missing from checks before cancel confirmation; holding new orders | %s",
                 order_id[:24] + "…",
                 self._active_limit_order_reason,
             )
@@ -561,7 +563,7 @@ class PaladinV7LiveEngine:
             return True
         if status and not self._order_status_is_closed(status):
             LOGGER.warning(
-                "PALADIN v7 order %s unresolved after cancel check; holding new orders | %s",
+                self._paladin_live_log_prefix + " order %s unresolved after cancel check; holding new orders | %s",
                 order_id[:24] + "…",
                 self._active_limit_order_reason,
             )
@@ -588,7 +590,7 @@ class PaladinV7LiveEngine:
             try:
                 api_after = float(self.trader.token_balance_allowance_refreshed(tok.token_id))
             except Exception as exc:
-                LOGGER.debug("PALADIN v7 active-order post balance read skipped: %s", exc)
+                LOGGER.debug(self._paladin_live_log_prefix + " active-order post balance read skipped: %s", exc)
                 api_after = api_before
             delta_api = max(0.0, api_after - api_before)
             if delta_api > max(1e-9, float(self.config.paladin_v7_reconcile_share_tolerance)):
@@ -617,7 +619,7 @@ class PaladinV7LiveEngine:
             )
         elif self._order_status_is_closed(status):
             LOGGER.info(
-                "PALADIN v7 active limit closed with no fill | %s | oid=%s",
+                self._paladin_live_log_prefix + " active limit closed with no fill | %s | oid=%s",
                 reason,
                 order_id[:24] + "…" if order_id else "?",
             )
@@ -649,7 +651,7 @@ class PaladinV7LiveEngine:
         try:
             order_state = self.trader.get_order(order_id)
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 persistent get_order %s: %s", order_id[:18], exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " persistent get_order %s: %s", order_id[:18], exc)
         status = ""
         filled = 0.0
         if order_state is not None:
@@ -673,7 +675,7 @@ class PaladinV7LiveEngine:
                     self._active_limit_order_cancel_requested = True
                     cancelled = self.trader.cancel_order(order_id)
                     LOGGER.info(
-                        "PALADIN v7 persistent hedge timeout cancel oid=%s cancelled=%s | %s | "
+                        self._paladin_live_log_prefix + " persistent hedge timeout cancel oid=%s cancelled=%s | %s | "
                         "elapsed=%d cancel_at_elapsed=%s wall_fallback=%s",
                         order_id[:24] + "…",
                         cancelled,
@@ -703,7 +705,7 @@ class PaladinV7LiveEngine:
         try:
             open_orders = self.trader.get_open_orders()
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 persistent get_open_orders %s: %s", order_id[:18], exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " persistent get_open_orders %s: %s", order_id[:18], exc)
             self._limit_order_busy_until_ts = max(self._limit_order_busy_until_ts, now + 1.0)
             return False
         for od in open_orders:
@@ -718,7 +720,7 @@ class PaladinV7LiveEngine:
             return False
         if not self._active_limit_order_cancel_requested:
             LOGGER.warning(
-                "PALADIN v7 persistent order %s missing before timeout cancel; still holding | %s",
+                self._paladin_live_log_prefix + " persistent order %s missing before timeout cancel; still holding | %s",
                 order_id[:24] + "…",
                 self._active_limit_order_reason,
             )
@@ -761,7 +763,7 @@ class PaladinV7LiveEngine:
             )
         )
         LOGGER.info(
-            "PALADIN v7 LIMIT filled %s %.4f sh @ %.4f ($%.2f) | %s | oid=%s",
+            self._paladin_live_log_prefix + " LIMIT filled %s %.4f sh @ %.4f ($%.2f) | %s | oid=%s",
             side.upper(),
             filled,
             avg_px,
@@ -792,10 +794,10 @@ class PaladinV7LiveEngine:
         px = round(px, 4)
         now = time.time()
         if self._has_unresolved_active_limit_order(now):
-            LOGGER.warning("PALADIN v7 refusing new %s order while tracked order is still unresolved", reason)
+            LOGGER.warning(self._paladin_live_log_prefix + " refusing new %s order while tracked order is still unresolved", reason)
             return 0.0
         if self._has_untracked_open_buy_order(contract, now):
-            LOGGER.warning("PALADIN v7 refusing new %s order while exchange still shows an open buy", reason)
+            LOGGER.warning(self._paladin_live_log_prefix + " refusing new %s order while exchange still shows an open buy", reason)
             return 0.0
         self._reset_api_reality_probe()
         exchange_min_shares = int(math.ceil(float(self.config.paladin_v7_min_shares)))
@@ -806,7 +808,7 @@ class PaladinV7LiveEngine:
         notion = req_shares * px
         if req_shares < min_shares - 1e-9 or notion < min_notional - 1e-9:
             LOGGER.info(
-                "PALADIN v7 skip BUY %s shares=%.4f px=%.4f notion=$%.2f reason=%s "
+                self._paladin_live_log_prefix + " skip BUY %s shares=%.4f px=%.4f notion=$%.2f reason=%s "
                 "(min_shares=%.4f min_notional=%.2f)",
                 side.upper(),
                 req_shares,
@@ -820,7 +822,8 @@ class PaladinV7LiveEngine:
         tok = contract.up if side == "up" else contract.down
         if self.config.dry_run:
             LOGGER.info(
-                "[PALADIN v7 dry_run] BUY %s size=%d @ %.4f (%s) ~$%.2f",
+                "[%s dry_run] BUY %s size=%d @ %.4f (%s) ~$%.2f",
+                self._paladin_live_log_prefix,
                 side.upper(),
                 size,
                 px,
@@ -844,7 +847,7 @@ class PaladinV7LiveEngine:
         try:
             api_before = float(self.trader.token_balance_allowance_refreshed(tok.token_id))
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 pre-buy balance read skipped: %s", exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " pre-buy balance read skipped: %s", exc)
         market_reasons = {"v7_first_binance_spike", "v7_balanced_btc_spike"}
         if str(reason) in market_reasons:
             try:
@@ -855,10 +858,10 @@ class PaladinV7LiveEngine:
                     confirm_get_order=True,
                 )
             except PolyApiException as exc:
-                LOGGER.warning("PALADIN v7 MARKET BUY rejected %s %s @ %.4f: %s", side, size, px, exc)
+                LOGGER.warning(self._paladin_live_log_prefix + " MARKET BUY rejected %s %s @ %.4f: %s", side, size, px, exc)
                 return 0.0
             except Exception as exc:
-                LOGGER.warning("PALADIN v7 live market BUY failed %s %s @ %.4f: %s", side, size, px, exc)
+                LOGGER.warning(self._paladin_live_log_prefix + " live market BUY failed %s %s @ %.4f: %s", side, size, px, exc)
                 return 0.0
             filled = max(0.0, float(getattr(res, "filled_shares", 0.0) or 0.0))
             order_id = str(getattr(res, "order_id", "") or "")
@@ -868,7 +871,7 @@ class PaladinV7LiveEngine:
             try:
                 api_after = float(self.trader.token_balance_allowance_refreshed(tok.token_id))
             except Exception as exc:
-                LOGGER.debug("PALADIN v7 market post-buy balance read skipped: %s", exc)
+                LOGGER.debug(self._paladin_live_log_prefix + " market post-buy balance read skipped: %s", exc)
             delta_api = max(0.0, api_after - api_before)
             if delta_api > max(1e-9, float(self.config.paladin_v7_reconcile_share_tolerance)):
                 filled = min(delta_api, float(req_shares))
@@ -885,7 +888,7 @@ class PaladinV7LiveEngine:
                 )
             spent = filled * avg_px
             if not _can_afford_live(st.spent_usdc, spent, budget):
-                LOGGER.warning("PALADIN v7: market fill would exceed budget; skipping state update (filled=%.4f)", filled)
+                LOGGER.warning(self._paladin_live_log_prefix + ": market fill would exceed budget; skipping state update (filled=%.4f)", filled)
                 return 0.0
             self._apply_live_buy_fill(
                 st,
@@ -910,15 +913,15 @@ class PaladinV7LiveEngine:
                 size,
             )
         except PolyApiException as exc:
-            LOGGER.warning("PALADIN v7 LIMIT POST rejected %s %s @ %.4f: %s", side, size, px, exc)
+            LOGGER.warning(self._paladin_live_log_prefix + " LIMIT POST rejected %s %s @ %.4f: %s", side, size, px, exc)
             return 0.0
         except Exception as exc:
-            LOGGER.warning("PALADIN v7 live limit BUY failed %s %s @ %.4f: %s", side, size, px, exc)
+            LOGGER.warning(self._paladin_live_log_prefix + " live limit BUY failed %s %s @ %.4f: %s", side, size, px, exc)
             return 0.0
         if isinstance(res, dict):
             order_id = str(res.get("orderID") or res.get("order_id") or res.get("id") or "")
         if not order_id:
-            LOGGER.warning("PALADIN v7 LIMIT post missing order id | %s %s @ %.4f | %s", side, size, px, reason)
+            LOGGER.warning(self._paladin_live_log_prefix + " LIMIT post missing order id | %s %s @ %.4f | %s", side, size, px, reason)
             return 0.0
 
         if persistent_limit_until_ts is not None:
@@ -932,7 +935,7 @@ class PaladinV7LiveEngine:
             self._limit_order_busy_until_ts = max(self._limit_order_busy_until_ts, time.time() + 0.8)
             self._limit_order_busy_reason = str(reason)
             LOGGER.info(
-                "PALADIN v7 LIMIT posted persistent %s %d @ %.4f until hedge timeout | %s | oid=%s",
+                self._paladin_live_log_prefix + " LIMIT posted persistent %s %d @ %.4f until hedge timeout | %s | oid=%s",
                 side.upper(),
                 size,
                 px,
@@ -957,7 +960,7 @@ class PaladinV7LiveEngine:
             try:
                 order_state = self.trader.get_order(order_id)
             except Exception as exc:
-                LOGGER.debug("PALADIN v7 get_order %s before cancel: %s", order_id[:18], exc)
+                LOGGER.debug(self._paladin_live_log_prefix + " get_order %s before cancel: %s", order_id[:18], exc)
                 time.sleep(0.25)
                 continue
             filled, spent, avg_px, status = self._buy_fill_from_order(order_state, px)
@@ -971,7 +974,7 @@ class PaladinV7LiveEngine:
             self._active_limit_order_cancel_requested = True
             cancelled = self.trader.cancel_order(order_id)
             LOGGER.info(
-                "PALADIN v7 LIMIT cancel %s oid=%s age=%.1fs cancelled=%s | %s",
+                self._paladin_live_log_prefix + " LIMIT cancel %s oid=%s age=%.1fs cancelled=%s | %s",
                 side.upper(),
                 order_id[:24] + "…",
                 cancel_after,
@@ -986,13 +989,13 @@ class PaladinV7LiveEngine:
         try:
             order_state = self.trader.get_order(order_id)
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 get_order %s after cancel: %s", order_id[:18], exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " get_order %s after cancel: %s", order_id[:18], exc)
         filled, spent, avg_px, status = self._buy_fill_from_order(order_state, px)
         if filled <= 1e-9:
             try:
                 api_after = float(self.trader.token_balance_allowance_refreshed(tok.token_id))
             except Exception as exc:
-                LOGGER.debug("PALADIN v7 post-buy balance read skipped: %s", exc)
+                LOGGER.debug(self._paladin_live_log_prefix + " post-buy balance read skipped: %s", exc)
                 api_after = api_before
             delta_api = max(0.0, api_after - api_before)
             if delta_api > max(1e-9, float(self.config.paladin_v7_reconcile_share_tolerance)):
@@ -1012,7 +1015,7 @@ class PaladinV7LiveEngine:
         if filled + 1e-9 >= req_shares or self._order_status_is_closed(status):
             self._clear_active_limit_order()
         if not _can_afford_live(st.spent_usdc, spent, budget):
-            LOGGER.warning("PALADIN v7: fill would exceed budget; skipping state update (filled=%.4f)", filled)
+            LOGGER.warning(self._paladin_live_log_prefix + ": fill would exceed budget; skipping state update (filled=%.4f)", filled)
             return 0.0
         self._apply_live_buy_fill(
             st,
@@ -1097,7 +1100,7 @@ class PaladinV7LiveEngine:
         # CLOB balances often lag right after a buy; API=0 with model>0 would incorrectly zero the leg.
         if cur + 1e-9 >= ms and api < 0.25:
             LOGGER.warning(
-                "PALADIN v7 post-buy: skip API align %s (API=%.4f vs model=%.4f; likely stale balance read)",
+                self._paladin_live_log_prefix + " post-buy: skip API align %s (API=%.4f vs model=%.4f; likely stale balance read)",
                 side.upper(),
                 api,
                 cur,
@@ -1109,7 +1112,7 @@ class PaladinV7LiveEngine:
             return
         if delta < -tol:
             LOGGER.warning(
-                "PALADIN v7 post-buy: skip trim %s (API %.4f vs model %.4f; wait for reconcile confirm)",
+                self._paladin_live_log_prefix + " post-buy: skip trim %s (API %.4f vs model %.4f; wait for reconcile confirm)",
                 side.upper(),
                 api,
                 cur,
@@ -1117,7 +1120,7 @@ class PaladinV7LiveEngine:
             return
         if delta > pos_cap + 1e-6:
             LOGGER.error(
-                "PALADIN v7 post-buy: clamping API add %s delta=%.4f -> cap=%.4f (API=%.4f model=%.4f)",
+                self._paladin_live_log_prefix + " post-buy: clamping API add %s delta=%.4f -> cap=%.4f (API=%.4f model=%.4f)",
                 side.upper(),
                 delta,
                 pos_cap,
@@ -1148,7 +1151,7 @@ class PaladinV7LiveEngine:
             )
         )
         LOGGER.warning(
-            "PALADIN v7 post-buy API add %s +%.4f sh @ %.4f (API %.4f vs model %.4f)",
+            self._paladin_live_log_prefix + " post-buy API add %s +%.4f sh @ %.4f (API %.4f vs model %.4f)",
             side.upper(),
             delta,
             float(px_hint),
@@ -1176,7 +1179,7 @@ class PaladinV7LiveEngine:
                 mx = float(self._v7_max_single_buy_shares())
                 if delta > mx + 1e-6:
                     LOGGER.warning(
-                        "PALADIN v7 reconcile: capping positive %s add %.4f -> %.4f (API vs model)",
+                        self._paladin_live_log_prefix + " reconcile: capping positive %s add %.4f -> %.4f (API vs model)",
                         side,
                         delta,
                         mx,
@@ -1206,7 +1209,7 @@ class PaladinV7LiveEngine:
                     )
                 )
                 LOGGER.warning(
-                    "PALADIN v7 reconcile SYNC +%.4f %s sh @ %.4f (~$%.2f) to match API (mid=%.4f if no exec ref)",
+                    self._paladin_live_log_prefix + " reconcile SYNC +%.4f %s sh @ %.4f (~$%.2f) to match API (mid=%.4f if no exec ref)",
                     delta,
                     side,
                     float(fill_px),
@@ -1216,7 +1219,7 @@ class PaladinV7LiveEngine:
             else:
                 self._shrink_leg(st, side, -delta)
                 LOGGER.warning(
-                    "PALADIN v7 reconcile TRIM %.4f %s sh (model ahead of API)",
+                    self._paladin_live_log_prefix + " reconcile TRIM %.4f %s sh (model ahead of API)",
                     -delta,
                     side,
                 )
@@ -1281,7 +1284,7 @@ class PaladinV7LiveEngine:
             api_u = float(self.trader.token_balance_allowance_refreshed(contract.up.token_id))
             api_d = float(self.trader.token_balance_allowance_refreshed(contract.down.token_id))
         except Exception as exc:
-            LOGGER.debug("PALADIN v7 balanced-state API reality check skipped: %s", exc)
+            LOGGER.debug(self._paladin_live_log_prefix + " balanced-state API reality check skipped: %s", exc)
             return self._api_reality_mismatch_count > 0
         tol = float(self.config.paladin_v7_reconcile_share_tolerance)
         api_gap = abs(api_u - api_d)
@@ -1304,7 +1307,7 @@ class PaladinV7LiveEngine:
             self._api_reality_last_d = api_d
         need = max(1, int(self.config.paladin_v7_api_reality_confirm_reads))
         LOGGER.info(
-            "PALADIN v7 balanced-state API check | model U=%.4f D=%.4f | API U=%.4f D=%.4f | gap=%.3f | streak=%d/%d",
+            self._paladin_live_log_prefix + " balanced-state API check | model U=%.4f D=%.4f | API U=%.4f D=%.4f | gap=%.3f | streak=%d/%d",
             st.size_up,
             st.size_down,
             api_u,
@@ -1316,7 +1319,7 @@ class PaladinV7LiveEngine:
         if self._api_reality_mismatch_count < need:
             return True
         LOGGER.warning(
-            "PALADIN v7 accepting API reality after %d balanced-state confirmations: model U=%.4f D=%.4f -> API U=%.4f D=%.4f",
+            self._paladin_live_log_prefix + " accepting API reality after %d balanced-state confirmations: model U=%.4f D=%.4f -> API U=%.4f D=%.4f",
             need,
             st.size_up,
             st.size_down,
@@ -1357,7 +1360,7 @@ class PaladinV7LiveEngine:
         sh = float(min(need, clip, room))
         if sh < float(self.config.paladin_v7_min_shares) - 1e-9:
             LOGGER.info(
-                "PALADIN v7 flatten skip: need=%.3f room=%.3f below min_shares",
+                self._paladin_live_log_prefix + " flatten skip: need=%.3f room=%.3f below min_shares",
                 need,
                 room,
             )
@@ -1381,7 +1384,7 @@ class PaladinV7LiveEngine:
             self._last_flatten_ts = now
             self._v7_window_flatten_fills += 1
             LOGGER.warning(
-                "PALADIN v7 flatten FAK | bought %s %.4f @ %.4f (imb was %.3f)",
+                self._paladin_live_log_prefix + " flatten FAK | bought %s %.4f @ %.4f (imb was %.3f)",
                 lighter.upper(),
                 filled,
                 px,
@@ -1413,7 +1416,7 @@ class PaladinV7LiveEngine:
         if mismatch:
             self._reconcile_mismatch_count += 1
             LOGGER.info(
-                "PALADIN v7 reconcile | model U=%.4f D=%.4f | API U=%.4f D=%.4f | "
+                self._paladin_live_log_prefix + " reconcile | model U=%.4f D=%.4f | API U=%.4f D=%.4f | "
                 "|dU|=%.3f |dD|=%.3f | streak=%d/%d",
                 st.size_up,
                 st.size_down,
@@ -1433,7 +1436,7 @@ class PaladinV7LiveEngine:
 
         self._reconcile_mismatch_count = 0
         LOGGER.warning(
-            "PALADIN v7 reconcile: applying API balances (confirmed %d reads)",
+            self._paladin_live_log_prefix + " reconcile: applying API balances (confirmed %d reads)",
             int(self.config.paladin_v7_reconcile_confirm_reads),
         )
         self._v7_window_reconcile_applies += 1
@@ -1478,11 +1481,11 @@ class PaladinV7LiveEngine:
                 self._limit_order_busy_reason = ""
             else:
                 LOGGER.warning(
-                    "PALADIN v7 live: carrying unresolved order %s into new window; no new orders until resolved",
+                    self._paladin_live_log_prefix + " live: carrying unresolved order %s into new window; no new orders until resolved",
                     self._active_limit_order_id[:24] + "…",
                 )
             self._v7_steps_fired = set()
-            LOGGER.info("PALADIN v7 live: new window %s", slug)
+            LOGGER.info(self._paladin_live_log_prefix + " live: new window %s", slug)
             if self._ws is not None:
                 self._ws.set_assets([contract.up.token_id, contract.down.token_id])
 
@@ -1493,7 +1496,7 @@ class PaladinV7LiveEngine:
             if self._pre_window_warned_slug != slug:
                 self._pre_window_warned_slug = slug
                 LOGGER.info(
-                    "PALADIN v7 live: pre-window for %s (opens in %.0fs); no entries until then",
+                    self._paladin_live_log_prefix + " live: pre-window for %s (opens in %.0fs); no entries until then",
                     slug,
                     start_ts - now,
                 )
@@ -1509,14 +1512,14 @@ class PaladinV7LiveEngine:
                 if self._force_exit_warned_slug != slug:
                     self._force_exit_warned_slug = slug
                     LOGGER.info(
-                        "PALADIN v7 live: force-exit zone (%.0fs left); no new entries (no open hedge)",
+                        self._paladin_live_log_prefix + " live: force-exit zone (%.0fs left); no new entries (no open hedge)",
                         secs_left,
                     )
                 return
             if self._force_exit_warned_slug != slug:
                 self._force_exit_warned_slug = slug
                 LOGGER.info(
-                    "PALADIN v7 live: force-exit zone (%.0fs left) but pending hedge — still trying",
+                    self._paladin_live_log_prefix + " live: force-exit zone (%.0fs left) but pending hedge — still trying",
                     secs_left,
                 )
 
@@ -1527,7 +1530,7 @@ class PaladinV7LiveEngine:
             if now - self._last_missing_price_log_ts >= hb:
                 self._last_missing_price_log_ts = now
                 LOGGER.info(
-                    "PALADIN v7 live: waiting for up/down mids (WS/REST); slug=%s",
+                    self._paladin_live_log_prefix + " live: waiting for up/down mids (WS/REST); slug=%s",
                     slug,
                 )
             return
@@ -1535,7 +1538,7 @@ class PaladinV7LiveEngine:
         if self._btc is None:
             if now - self._last_missing_price_log_ts >= 30.0:
                 self._last_missing_price_log_ts = now
-                LOGGER.warning("PALADIN v7: BTC feed disabled — cannot evaluate spikes; enable BOT_BTC_FEED_ENABLED")
+                LOGGER.warning(self._paladin_live_log_prefix + ": BTC feed disabled — cannot evaluate spikes; enable BOT_BTC_FEED_ENABLED")
             return
 
         btc_point = self._btc.poll()
@@ -1572,7 +1575,7 @@ class PaladinV7LiveEngine:
             if self._new_cutoff_warned_slug != slug:
                 self._new_cutoff_warned_slug = slug
                 LOGGER.info(
-                    "PALADIN v7 live: new-order cutoff (%.0fs left <= %.0fs); no new clips (hedges still run)",
+                    self._paladin_live_log_prefix + " live: new-order cutoff (%.0fs left <= %.0fs); no new clips (hedges still run)",
                     secs_left,
                     cutoff,
                 )
@@ -1584,7 +1587,7 @@ class PaladinV7LiveEngine:
             snap = runner.st.snapshot_metrics()
             pend_s = f"{pend[0]}×{pend[1]:.0f}" if pend is not None else "—"
             LOGGER.info(
-                "PALADIN v7 hb | %s | el=%ds left=%.0fs | mkt_mid up=%.4f dn=%.4f | "
+                self._paladin_live_log_prefix + " hb | %s | el=%ds left=%.0fs | mkt_mid up=%.4f dn=%.4f | "
                 "btc=%.2f vol+%.4f/sum_el | spent=$%.2f | inv UP=%.2fsh vwap=%.3f | inv DN=%.2fsh vwap=%.3f | "
                 "pnl_up=$%.2f pnl_dn=$%.2f | pending=%s trades=%d | "
                 "api_rec=%d api_flat=%d",
