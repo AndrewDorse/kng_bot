@@ -518,5 +518,675 @@
     "removed_week_hits": 7,
     "removed_week_wins": 4,
     "removed_at_utc": "2026-04-26T13:45:07Z"
+  },
+  {
+    "timeframe": "15m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GRG|last=GSh",
+    "pred": "G",
+    "wr": 0.70455,
+    "n": 44,
+    "removed_reason": "User request: remove B_rg_suffix_lastTok GRG|last=GSh from live",
+    "removed_at_utc": "2026-04-26T19:29:28Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRRR|last=RLh",
+    "pred": "G",
+    "wr": 0.6087,
+    "n": 46,
+    "removed_reason": "5m month eval: wr_eval < 55% (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T19:37:32Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "GLl>RSl",
+    "pred": "G",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "5m month eval: wr_eval < 55% (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T19:37:32Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GRG|last=GSl|rng=w",
+    "pred": "G",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "5m month eval: wr_eval < 55% (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T19:37:32Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GR|t-1=GLl|t=RSl",
+    "pred": "G",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "5m month eval: wr_eval < 55% (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T19:37:32Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RGRR|last=RMl|rng=n",
+    "pred": "R",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "5m month eval: wr_eval < 55% (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T19:37:32Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GGGGR|last=RMl|rng=w",
+    "pred": "G",
+    "wr": 0.68,
+    "n": 25,
+    "removed_reason": "5m month eval: wr_eval < 55% (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T19:37:32Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GRG|t-1=RLl|t=GMl",
+    "pred": "R",
+    "wr": 0.67647,
+    "n": 34,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRGR|last=RLh",
+    "pred": "G",
+    "wr": 0.67442,
+    "n": 43,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GG|t-1=GMl|t=GLl",
+    "pred": "R",
+    "wr": 0.65854,
+    "n": 41,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "GMl>GLl",
+    "pred": "R",
+    "wr": 0.65854,
+    "n": 41,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RRGR|last=RLh|rng=W",
+    "pred": "G",
+    "wr": 0.65714,
+    "n": 35,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RR|last=RSm|rng=n",
+    "pred": "G",
+    "wr": 0.64286,
+    "n": 42,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "RLh>RLh",
+    "pred": "G",
+    "wr": 0.62791,
+    "n": 43,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RR|t-1=RLh|t=RLh",
+    "pred": "G",
+    "wr": 0.62791,
+    "n": 43,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRR|last=RMm",
+    "pred": "G",
+    "wr": 0.625,
+    "n": 32,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GG|t-1=GLl|t=GSl",
+    "pred": "G",
+    "wr": 0.62162,
+    "n": 37,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "GLl>GSl",
+    "pred": "G",
+    "wr": 0.62162,
+    "n": 37,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RG|t-1=RLl|t=GMl",
+    "pred": "R",
+    "wr": 0.61404,
+    "n": 57,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "RLl>GMl",
+    "pred": "R",
+    "wr": 0.61404,
+    "n": 57,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RG|t-1=RMl|t=GSl",
+    "pred": "G",
+    "wr": 0.61111,
+    "n": 72,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "RMl>GSl",
+    "pred": "G",
+    "wr": 0.61111,
+    "n": 72,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRGGG|last=GSl",
+    "pred": "G",
+    "wr": 0.61111,
+    "n": 36,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RRGG|last=GMl|rng=w",
+    "pred": "R",
+    "wr": 0.61111,
+    "n": 36,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRRGR|last=RMl",
+    "pred": "R",
+    "wr": 0.61111,
+    "n": 36,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GGGGR|last=RMl|rng=n",
+    "pred": "R",
+    "wr": 0.71429,
+    "n": 28,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GGR|t-1=GLh|t=RMl",
+    "pred": "R",
+    "wr": 0.7037,
+    "n": 27,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRRRGG|last=GMl",
+    "pred": "R",
+    "wr": 0.69697,
+    "n": 33,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRRGGR|last=RLl",
+    "pred": "G",
+    "wr": 0.69231,
+    "n": 39,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GGGGRR|last=RMl",
+    "pred": "R",
+    "wr": 0.68966,
+    "n": 29,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GGGRRRG|last=GSl",
+    "pred": "G",
+    "wr": 0.68966,
+    "n": 29,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GGG|last=GLl",
+    "pred": "R",
+    "wr": 0.60194,
+    "n": 103,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RRG|last=GMh|rng=w",
+    "pred": "G",
+    "wr": 0.63333,
+    "n": 30,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GGR|t-1=GLl|t=RSl",
+    "pred": "R",
+    "wr": 0.625,
+    "n": 32,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RGGG|t-1=GSl|t=GMl",
+    "pred": "G",
+    "wr": 0.625,
+    "n": 32,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GRRR|last=RMl|rng=w",
+    "pred": "G",
+    "wr": 0.61905,
+    "n": 42,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RGR|t-1=GSl|t=RLl",
+    "pred": "R",
+    "wr": 0.61765,
+    "n": 34,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRRR|last=RSh",
+    "pred": "G",
+    "wr": 0.61765,
+    "n": 34,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GGG|last=GMm",
+    "pred": "R",
+    "wr": 0.61364,
+    "n": 44,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GGRGR|last=RSl|rng=n",
+    "pred": "G",
+    "wr": 0.61364,
+    "n": 44,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RGGG|last=GMl|rng=n",
+    "pred": "G",
+    "wr": 0.61364,
+    "n": 44,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GGRR|t-1=RSl|t=RSl",
+    "pred": "R",
+    "wr": 0.6129,
+    "n": 31,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GG|t-1=GLh|t=GSh",
+    "pred": "R",
+    "wr": 0.6129,
+    "n": 31,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "GLh>GSh",
+    "pred": "R",
+    "wr": 0.6129,
+    "n": 31,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GRRG|last=GMh",
+    "pred": "G",
+    "wr": 0.6129,
+    "n": 31,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RGGRRG|last=GMl",
+    "pred": "G",
+    "wr": 0.6129,
+    "n": 31,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RGGR|t-1=GSl|t=RSl",
+    "pred": "R",
+    "wr": 0.6129,
+    "n": 31,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GRG|t-1=RSl|t=GSl",
+    "pred": "R",
+    "wr": 0.60938,
+    "n": 64,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GGG|t-1=GMl|t=GMl",
+    "pred": "R",
+    "wr": 0.6087,
+    "n": 46,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GGRGG|last=GLh",
+    "pred": "R",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GGRGG|last=GLh|rng=W",
+    "pred": "R",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GGRG|last=GLl|rng=w",
+    "pred": "R",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GGRR|last=RLl|rng=w",
+    "pred": "G",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RGRRG|last=GSl|rng=n",
+    "pred": "G",
+    "wr": 0.60606,
+    "n": 33,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GGR|t-1=GLl|t=RLl",
+    "pred": "G",
+    "wr": 0.60526,
+    "n": 38,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RGR|last=RSm",
+    "pred": "R",
+    "wr": 0.60526,
+    "n": 38,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GR|last=RMh|rng=W",
+    "pred": "G",
+    "wr": 0.60417,
+    "n": 48,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RG|t-1=RLh|t=GLh",
+    "pred": "R",
+    "wr": 0.6,
+    "n": 55,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "A_token_chain",
+    "pattern_key": "RLh>GLh",
+    "pred": "R",
+    "wr": 0.6,
+    "n": 55,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RGGGG|last=GMl",
+    "pred": "R",
+    "wr": 0.6,
+    "n": 50,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRGGG|last=GLh",
+    "pred": "G",
+    "wr": 0.6,
+    "n": 45,
+    "removed_reason": "worst 30 by 4w wr_eval (after pnl trim) (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GGGGRG|last=GSl",
+    "pred": "R",
+    "wr": 0.6,
+    "n": 35,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RGGRGG|last=GMl",
+    "pred": "R",
+    "wr": 0.6,
+    "n": 35,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RGRR|last=RSh",
+    "pred": "G",
+    "wr": 0.6,
+    "n": 35,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GR|last=RSl|rng=W",
+    "pred": "R",
+    "wr": 0.6,
+    "n": 30,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RG|last=GSl|rng=W",
+    "pred": "G",
+    "wr": 0.6,
+    "n": 30,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
+  },
+  {
+    "timeframe": "5m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "RRGR|t-1=GLl|t=RLl",
+    "pred": "G",
+    "wr": 0.6,
+    "n": 30,
+    "removed_reason": "worst 30 by 4w pnl_usdc (REPORT_5m_live_rules_4weeks.csv)",
+    "removed_at_utc": "2026-04-26T20:10:06Z"
   }
 ]
