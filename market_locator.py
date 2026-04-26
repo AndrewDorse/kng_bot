@@ -47,6 +47,8 @@ class GammaMarketLocator:
         self.session = create_polymarket_session()
         self._cached_contract: ActiveContract | None = None
         self._cache_expires_at = 0.0
+        # SHAMAN (and similar): separate Gamma slugs per window length, e.g. btc-updown-5m-* vs btc-updown-15m-*
+        self._contract_by_window_min: dict[int, tuple[ActiveContract | None, float]] = {}
 
     def get_active_contract(self) -> ActiveContract | None:
         now = time.time()
@@ -64,6 +66,44 @@ class GammaMarketLocator:
             self._cached_contract = contract
             self._cache_expires_at = now + 30.0
         return contract
+
+    def get_active_contract_for_window_minutes(self, window_minutes: int) -> ActiveContract | None:
+        """Resolve UP/DOWN market for a specific candle window (5 vs 15), independent of ``BOT_WINDOW_MINUTES``."""
+        if window_minutes <= 0:
+            return self.get_active_contract()
+        now = time.time()
+        now_dt = datetime.now(timezone.utc)
+        window_size = int(window_minutes) * 60
+        tup = self._contract_by_window_min.get(int(window_minutes))
+        if tup is not None:
+            contract, cache_expires_at = tup
+            if contract is not None and contract.end_time > now_dt:
+                cached_start = contract.end_time.timestamp() - window_size
+                if now >= cached_start or now < cache_expires_at:
+                    return contract
+        contract = self._discover_for_window_minutes(int(window_minutes))
+        self._contract_by_window_min[int(window_minutes)] = (contract, now + 30.0)
+        return contract
+
+    @_retry(max_attempts=5, backoff_base=0.75)
+    def _discover_for_window_minutes(self, window_minutes: int) -> ActiveContract | None:
+        now = datetime.now(timezone.utc)
+        now_ts = int(now.timestamp())
+        window_size = window_minutes * 60
+        current_start = (now_ts // window_size) * window_size
+        target_start = current_start
+        sym = self.config.market_symbol.lower()
+        slug = f"{sym}-updown-{window_minutes}m-{target_start}"
+        resp = self.session.get(
+            f"{GAMMA_URL}/markets",
+            params={"slug": slug},
+            timeout=self.config.request_timeout_seconds,
+        )
+        resp.raise_for_status()
+        markets = resp.json()
+        if not markets:
+            return None
+        return self._parse(markets[0], now)
 
     @_retry(max_attempts=5, backoff_base=0.75)
     def _discover(self) -> ActiveContract | None:
