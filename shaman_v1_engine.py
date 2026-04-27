@@ -203,8 +203,9 @@ class ShamanV1Engine:
         except Exception as exc:
             bal_s = f"error:{exc!r}"
         _LOG.info(
-            "INIT version=%s dry_run=%s wallet_usdc=%s rules_5m=%d rules_15m=%d "
-            "order_usdc=$%.2f_if_1_signal_else_$%.2f_each max=$%.2f (fractional_shares_clip) btc=%s poll_s=%.2f",
+            "INIT version=%s dry_run=%s (if true: Polymarket orders are NOT sent; set POLY_DRY_RUN=false for live) "
+            "wallet_usdc=%s rules_5m=%d rules_15m=%d "
+            "order_usdc=$%.2f_if_1_signal_else_$%.2f_each max=$%.2f btc=%s poll_s=%.2f",
             self.config.bot_version,
             self.config.dry_run,
             bal_s,
@@ -370,6 +371,8 @@ class ShamanV1Engine:
                                 action += " SENT"
                             except Exception as exc:
                                 action += f" ORDER_ERR={exc!r}"
+                        else:
+                            action += " NO_SEND_POLY_DRY_RUN"
                     else:
                         action = "PM_skip notional<=0"
                 else:
