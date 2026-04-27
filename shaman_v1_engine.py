@@ -22,6 +22,8 @@ from trader import PolymarketTrader
 
 _BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 _LOG = logging.getLogger("shaman_v1")
+# Polymarket CLOB: order notional (shares × limit price) must be at least $1 USDC; 1 sh @ 0.99 = $0.99 → rejected.
+_CLOB_MIN_ORDER_USDC = 1.0
 
 
 def configure_shaman_runtime_logging() -> None:
@@ -141,14 +143,23 @@ def _notional_usdc(winning_count: int, cfg: BotConfig) -> float:
 
 
 def _shares_for_usdc_clip(*, notional_usdc: float, limit_px: float) -> float:
-    """**Whole shares only** (2 not 2.02): floor(notional/price) so the CLOB never sees long fractions."""
+    """Whole shares; CLOB taker `size` must not imply **< $1** notional (e.g. 1 @ 0.99 → invalid).
+
+    Start from ``floor(notional/price)``. If that order value is under ``_CLOB_MIN_ORDER_USDC``,
+    use ``ceil(1.0/price)`` shares instead (may spend more than *integer* notional; e.g. $1 budget @ 0.99 → 2 sh).
+    """
     if notional_usdc <= 0 or limit_px <= 0:
         return 0.0
     usd, px = float(notional_usdc), float(limit_px)
     if px <= 0:
         return 0.0
     n = int(math.floor(usd / px + 1e-12))
-    return float(max(0, n))
+    if n <= 0:
+        return 0.0
+    est = n * px
+    if est < _CLOB_MIN_ORDER_USDC - 1e-9:
+        n = int(math.ceil(_CLOB_MIN_ORDER_USDC / px - 1e-12))
+    return float(n)
 
 
 @dataclass(slots=True)
@@ -361,8 +372,7 @@ class ShamanV1Engine:
                 if ask is not None and ask > 0:
                     pad = max(0.0, float(self.config.shaman_v1_price_pad))
                     entry_limit_px = min(0.99, round(float(ask) + pad, 2))
-                    # Notional: 1 / n rules → raw USDC, cap, then 1dp rounding (min $1); then shares@4dp.
-                    # CLOB ``size`` is outcome shares; cap notional ≈ shares * limit_price (no min-share gate).
+                    # Integer $ budget → whole shares, with CLOB $1 min order value (sh×px), not 0.99 @0.99.
                     shares = _shares_for_usdc_clip(notional_usdc=notional, limit_px=entry_limit_px)
                     if shares > 1e-9:
                         entry_ask = float(ask)
