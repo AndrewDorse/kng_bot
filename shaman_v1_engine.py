@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -120,12 +121,34 @@ def _binance_rg(i: int, o: list[float], c: list[float]) -> str | None:
     return None
 
 
+def _integer_clip_notional_usdc(x: float) -> float:
+    """Clip budget in whole USDC only ($1, $2, …), never < $1."""
+    if x <= 0:
+        return 0.0
+    return float(max(1, int(math.floor(float(x) + 1e-9))))
+
+
 def _notional_usdc(winning_count: int, cfg: BotConfig) -> float:
-    """USDC clip size = (rules on winning side) * per-signal, capped (each signal $1 by default)."""
+    """USDC clip: raw $ from rules, cap, then **integer** dollars (min $1)."""
     if winning_count <= 0:
         return 0.0
-    raw = float(winning_count) * float(cfg.shaman_v1_usdc_per_signal)
-    return min(float(cfg.shaman_v1_notional_max_usdc), raw)
+    if winning_count == 1:
+        raw = float(cfg.shaman_v1_usdc_single_signal)
+    else:
+        raw = float(winning_count) * float(cfg.shaman_v1_usdc_per_signal)
+    capped = min(float(cfg.shaman_v1_notional_max_usdc), raw)
+    return _integer_clip_notional_usdc(capped)
+
+
+def _shares_for_usdc_clip(*, notional_usdc: float, limit_px: float) -> float:
+    """**Whole shares only** (2 not 2.02): floor(notional/price) so the CLOB never sees long fractions."""
+    if notional_usdc <= 0 or limit_px <= 0:
+        return 0.0
+    usd, px = float(notional_usdc), float(limit_px)
+    if px <= 0:
+        return 0.0
+    n = int(math.floor(usd / px + 1e-12))
+    return float(max(0, n))
 
 
 @dataclass(slots=True)
@@ -138,7 +161,7 @@ class _Pending:
     n_r: int
     pm_side: str | None
     notional: float
-    shares: int
+    shares: float
     entry_ask: float | None
     entry_limit_px: float
     token_id: str | None
@@ -192,15 +215,15 @@ class ShamanV1Engine:
             bal_s = f"error:{exc!r}"
         _LOG.info(
             "INIT version=%s dry_run=%s wallet_usdc=%s rules_5m=%d rules_15m=%d "
-            "clip_usdc=$%.2f_per_signal max=$%.2f min_sh=%d btc=%s poll_s=%.2f",
+            "order_usdc=$%.2f_if_1_signal_else_$%.2f_each max=$%.2f (fractional_shares_clip) btc=%s poll_s=%.2f",
             self.config.bot_version,
             self.config.dry_run,
             bal_s,
             len(self._rules_5m),
             len(self._rules_15m),
+            float(self.config.shaman_v1_usdc_single_signal),
             float(self.config.shaman_v1_usdc_per_signal),
             float(self.config.shaman_v1_notional_max_usdc),
-            int(self.config.shaman_v1_min_shares),
             self.config.btc_feed_symbol,
             float(self.config.poll_interval_seconds),
         )
@@ -223,7 +246,7 @@ class ShamanV1Engine:
             match = "WRONG"
 
         pnl_part = ""
-        if self.config.dry_run and pending.pred is not None and pending.shares > 0 and pending.token_id and pending.entry_ask is not None:
+        if self.config.dry_run and pending.pred is not None and pending.shares > 1e-9 and pending.token_id and pending.entry_ask is not None:
             bid = self.trader.get_best_bid(pending.token_id)
             if bid is not None and bid > 0:
                 pnl = pending.shares * (float(bid) - float(pending.entry_ask))
@@ -315,13 +338,14 @@ class ShamanV1Engine:
         next_open_ms = closed_open_ms + interval_ms
         sig_part = (
             f"nG={ng} nR={nr} pred_binance={pred or 'TIE'} pred_PM={win_side or 'NONE'} "
-            f"winning_signals={winning} usdc_per_signal={float(self.config.shaman_v1_usdc_per_signal):.2f} "
+            f"winning_signals={winning} "
+            f"usdc_1={float(self.config.shaman_v1_usdc_single_signal):.2f} usdc_n_each={float(self.config.shaman_v1_usdc_per_signal):.2f} "
             f"notional_usdc={notional:.2f}"
         )
 
         entry_ask = None
         entry_limit_px = 0.0
-        shares = 0
+        shares = 0.0
         token_id: str | None = None
         slug = ""
         contract = self.locator.get_active_contract_for_window_minutes(window_minutes)
@@ -337,12 +361,17 @@ class ShamanV1Engine:
                 if ask is not None and ask > 0:
                     pad = max(0.0, float(self.config.shaman_v1_price_pad))
                     entry_limit_px = min(0.99, round(float(ask) + pad, 2))
-                    shares = int(notional / entry_limit_px) if entry_limit_px > 0 else 0
-                    min_sh = max(1, int(self.config.shaman_v1_min_shares))
-                    if shares >= min_sh and shares * entry_limit_px >= float(self.config.shaman_v1_min_notional_usdc):
+                    # Notional: 1 / n rules → raw USDC, cap, then 1dp rounding (min $1); then shares@4dp.
+                    # CLOB ``size`` is outcome shares; cap notional ≈ shares * limit_price (no min-share gate).
+                    shares = _shares_for_usdc_clip(notional_usdc=notional, limit_px=entry_limit_px)
+                    if shares > 1e-9:
                         entry_ask = float(ask)
                         token_id = tok.token_id
-                        action = f"PM_clip shares={shares} limit<={entry_limit_px:.2f} ask={ask:.2f} slug={slug} Tminus_s={rem:.0f}"
+                        est = shares * entry_limit_px
+                        action = (
+                            f"PM_clip sz={shares:.6f} cap≈${est:.2f}/${notional:.2f} "
+                            f"limit<={entry_limit_px:.2f} ask={ask:.2f} slug={slug} Tminus_s={rem:.0f}"
+                        )
                         if not self.config.dry_run:
                             try:
                                 self.trader.place_marketable_buy_with_result(
@@ -355,7 +384,10 @@ class ShamanV1Engine:
                             except Exception as exc:
                                 action += f" ORDER_ERR={exc!r}"
                     else:
-                        action = "PM_skip size_or_notional"
+                        action = (
+                            f"PM_skip clip_too_small_for_one_share "
+                            f"(notional=${notional:.2f} limit_px={entry_limit_px:.2f} min_sz≈{1.0 / entry_limit_px:.4f}sh)"
+                        )
                 else:
                     action = "PM_skip no_ask"
             else:

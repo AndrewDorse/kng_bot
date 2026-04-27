@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import threading
 import time
+from decimal import ROUND_DOWN, Decimal
 from functools import wraps
 from typing import Any
 
@@ -22,6 +23,18 @@ from config import (
     HOST, CHAIN_ID, BUY, SELL, LOGGER,
     BotConfig, TokenMarket, parse_balance_response,
 )
+
+
+def _clob_taker_size_shares(size: float) -> float:
+    """Polymarket CLOB: taker (outcome share) size — max 4 decimal places, no float noise.
+
+    SHAMAN sizes outcome shares as **integers** in ``shaman_v1_engine`` so notional/price
+    never produces values like 2.0202 at 0.99.
+    """
+    if size <= 0:
+        return 0.0
+    q = Decimal(str(float(size))).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+    return float(f"{float(q):.4f}")
 
 
 def _retry(max_attempts=2, backoff_base=0.5, retryable=(requests.RequestException,)):
@@ -169,7 +182,6 @@ class PolymarketTrader:
     # Order placement
     # ------------------------------------------------------------------
 
-    @_retry()
     def place_limit_buy(
         self,
         token: TokenMarket,
@@ -185,24 +197,28 @@ class PolymarketTrader:
             token: TokenMarket with .token_id
             price: limit price (0.01–0.99)
             size:  number of shares (integer)
+
+        Order submissions are intentionally not retried automatically. If the network drops
+        after POST, the exchange may still have accepted the order; retrying can double-fill.
         """
-        order_kwargs: dict[str, Any] = {
-            "token_id": token.token_id,
-            "price": round(price, 2),
-            "size": float(size),
-            "side": BUY,
-        }
-        if fee_rate_bps is not None:
-            order_kwargs["fee_rate_bps"] = fee_rate_bps
-        order = OrderArgs(**order_kwargs)
-        signed = self.client.create_order(order)
-        return self.client.post_order(signed, OrderType.GTC, post_only=post_only)
+        with self._taker_order_lock:
+            order_kwargs: dict[str, Any] = {
+                "token_id": token.token_id,
+                "price": round(price, 2),
+                "size": float(size),
+                "side": BUY,
+            }
+            if fee_rate_bps is not None:
+                order_kwargs["fee_rate_bps"] = fee_rate_bps
+            order = OrderArgs(**order_kwargs)
+            signed = self.client.create_order(order)
+            return self.client.post_order(signed, OrderType.GTC, post_only=post_only)
 
     def place_marketable_buy(
         self,
         token: TokenMarket,
         price: float,
-        size: int,
+        size: float,
         *,
         fee_rate_bps: int | None = None,
     ) -> dict[str, Any]:
@@ -212,19 +228,19 @@ class PolymarketTrader:
                 token, price, size, fee_rate_bps=fee_rate_bps
             )
 
-    @_retry()
     def _place_marketable_buy_impl(
         self,
         token: TokenMarket,
         price: float,
-        size: int,
+        size: float,
         *,
         fee_rate_bps: int | None = None,
     ) -> dict[str, Any]:
+        sz = _clob_taker_size_shares(size)
         order_kwargs: dict[str, Any] = {
             "token_id": token.token_id,
             "price": round(price, 2),
-            "size": float(size),
+            "size": sz,
             "side": BUY,
         }
         if fee_rate_bps is not None:
@@ -237,12 +253,16 @@ class PolymarketTrader:
         self,
         token: TokenMarket,
         price: float,
-        size: int,
+        size: float,
         *,
         confirm_get_order: bool = True,
         fee_rate_bps: int | None = None,
     ) -> Any:
-        """Submit FAK buy; parse POST body and optionally confirm fill via GET /order."""
+        """Submit one FAK buy; parse POST body and optionally confirm fill via GET /order.
+
+        This path is intentionally single-shot. Taker-order POST retries can create duplicate
+        fills when the first POST succeeds but the client loses the response.
+        """
         with self._taker_order_lock:
             return self._place_marketable_buy_with_result_impl(
                 token,
@@ -252,22 +272,22 @@ class PolymarketTrader:
                 fee_rate_bps=fee_rate_bps,
             )
 
-    @_retry()
     def _place_marketable_buy_with_result_impl(
         self,
         token: TokenMarket,
         price: float,
-        size: int,
+        size: float,
         *,
         confirm_get_order: bool = True,
         fee_rate_bps: int | None = None,
     ) -> Any:
         from clob_fak import fak_buy_with_confirm
 
+        sz = _clob_taker_size_shares(size)
         order_kwargs: dict[str, Any] = {
             "token_id": token.token_id,
             "price": round(price, 2),
-            "size": float(size),
+            "size": sz,
             "side": BUY,
         }
         if fee_rate_bps is not None:
@@ -278,12 +298,11 @@ class PolymarketTrader:
         return fak_buy_with_confirm(
             self.client.get_order,
             raw,
-            requested_shares=size,
+            requested_shares=float(sz),
             limit_price=float(price),
             confirm=confirm_get_order,
         )
 
-    @_retry()
     def place_limit_sell(
         self, token: TokenMarket, price: float, size: int
     ) -> dict[str, Any]:
@@ -313,14 +332,13 @@ class PolymarketTrader:
         with self._taker_order_lock:
             return self._place_marketable_sell_impl(token, price, size)
 
-    @_retry()
     def _place_marketable_sell_impl(
         self, token: TokenMarket, price: float, size: float
     ) -> dict[str, Any]:
         order = OrderArgs(
             token_id=token.token_id,
             price=round(price, 2),
-            size=float(size),
+            size=_clob_taker_size_shares(size),
             side=SELL,
         )
         signed = self.client.create_order(order)
@@ -345,6 +363,11 @@ class PolymarketTrader:
         except Exception as exc:
             LOGGER.debug("Cancel failed %s: %s", order_id, exc)
             return False
+
+    @_retry()
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        """Fetch one order by ID."""
+        return self.client.get_order(order_id)
 
     def cancel_all_orders(self, open_orders: list[dict[str, Any]] | None = None) -> int:
         """Cancel all open orders. If open_orders not provided, fetches them first.
