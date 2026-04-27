@@ -121,9 +121,11 @@ def _binance_rg(i: int, o: list[float], c: list[float]) -> str | None:
 
 
 def _notional_usdc(winning_count: int, cfg: BotConfig) -> float:
-    n = max(1, winning_count)
-    raw = cfg.shaman_v1_notional_base_usdc + (n - 1) * cfg.shaman_v1_notional_per_extra_signal_usdc
-    return min(float(cfg.shaman_v1_notional_max_usdc), float(raw))
+    """USDC clip size = (rules on winning side) * per-signal, capped (each signal $1 by default)."""
+    if winning_count <= 0:
+        return 0.0
+    raw = float(winning_count) * float(cfg.shaman_v1_usdc_per_signal)
+    return min(float(cfg.shaman_v1_notional_max_usdc), raw)
 
 
 @dataclass(slots=True)
@@ -190,14 +192,13 @@ class ShamanV1Engine:
             bal_s = f"error:{exc!r}"
         _LOG.info(
             "INIT version=%s dry_run=%s wallet_usdc=%s rules_5m=%d rules_15m=%d "
-            "clip_usdc_1sig=$%.2f +$%.2f_per_extra max=$%.2f min_sh=%d btc=%s poll_s=%.2f",
+            "clip_usdc=$%.2f_per_signal max=$%.2f min_sh=%d btc=%s poll_s=%.2f",
             self.config.bot_version,
             self.config.dry_run,
             bal_s,
             len(self._rules_5m),
             len(self._rules_15m),
-            float(self.config.shaman_v1_notional_base_usdc),
-            float(self.config.shaman_v1_notional_per_extra_signal_usdc),
+            float(self.config.shaman_v1_usdc_per_signal),
             float(self.config.shaman_v1_notional_max_usdc),
             int(self.config.shaman_v1_min_shares),
             self.config.btc_feed_symbol,
@@ -312,7 +313,11 @@ class ShamanV1Engine:
 
         notional = _notional_usdc(winning, self.config) if pred is not None else 0.0
         next_open_ms = closed_open_ms + interval_ms
-        sig_part = f"nG={ng} nR={nr} pred_binance={pred or 'TIE'} pred_PM={win_side or 'NONE'} notional_usdc={notional:.2f}"
+        sig_part = (
+            f"nG={ng} nR={nr} pred_binance={pred or 'TIE'} pred_PM={win_side or 'NONE'} "
+            f"winning_signals={winning} usdc_per_signal={float(self.config.shaman_v1_usdc_per_signal):.2f} "
+            f"notional_usdc={notional:.2f}"
+        )
 
         entry_ask = None
         entry_limit_px = 0.0

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Append top-N by WR and top-N by isolated $3/fill PnL from ``shaman_v1_rules_candidates.json``
+Append top-N by WR and top-N by isolated $1/fill PnL from ``shaman_v1_rules_candidates.json``
 into ``shaman_v1_rules.json`` (dedupe by key; skip keys already live).
 
 Run from repo root:
@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 PAL = REPO / "PALADIN"
 LIVE_JSON = PAL / "shaman_v1_rules.json"
 CAND_JSON = PAL / "shaman_v1_rules_candidates.json"
-STAKE = 3.0
+STAKE = 1.0
 
 
 def _spec_blocked(r: dict) -> bool:

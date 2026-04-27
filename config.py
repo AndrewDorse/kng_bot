@@ -77,6 +77,8 @@ def _normalize_strategy_mode(raw: str | None) -> str:
         return "paladin_v7"
     if s in ("paladin_v9", "paladin9", "paladin_v9_live", "kng3_v9", "v9_live"):
         return "paladin_v9"
+    if s in ("shaman_v1", "shaman1", "shaman"):
+        return "shaman_v1"
     if s in ("iy2", "iy_2", "wallet_overlap", "wallet_overlap_live", "iy2_live"):
         return "iy2"
     if s in ("iy3", "iy_3", "wallet_overlap_path", "wallet_overlap_path_live", "iy3_live"):
@@ -140,8 +142,8 @@ class BotConfig:
     btc_feed_poll_seconds: float = 1.0
     btc_feed_symbol: str = "BTCUSDT"
     signal_preset: str = "w1"
-    # paladin | paladin_v7 | paladin_v9 | champ4_6s | iy2 | strategy_0 | aa1 | mimic_lot | box_balance | signal_only | wd | volume_t10 | volume_t10_hybrid | volume_scalp_up | btc_perp15
-    strategy_mode: str = "paladin_v9"
+    # SHAMAN-only entry (main.py): use shaman_v1. Other mode strings remain for config/imports elsewhere.
+    strategy_mode: str = "shaman_v1"
     # volume scalp: fixed-lot directional entries with one shared TP per held side plus stop/time-exit risk control.
     volume_scalp_tp_offset: float = 0.12
     volume_scalp_stop_offset: float = 0.05
@@ -232,9 +234,11 @@ class BotConfig:
     paladin_v7_cheap_pair_avg_sum_nonforced_max: float = 0.96
     # Hedge cheap-gate uses opposite_mid + this buffer vs cap (FAK VWAP often > mid).
     paladin_v7_cheap_hedge_slip_buffer: float = 0.012
+    # Extra PM discount added to slip in cheap-hedge limit math (sim + live resting clamp).
+    paladin_v7_hedge_slip_addon_pm: float = 0.10
     # Seconds after first leg before a *cheap* hedge may execute (0 = immediate when gate passes).
     paladin_v7_cheap_hedge_min_delay_sec: float = 0.0
-    paladin_v7_hedge_timeout_seconds: float = 30.0
+    paladin_v7_hedge_timeout_seconds: float = 90.0
     paladin_v7_forced_hedge_max_book_sum: float = 1.30
     # Legacy layer-entry cooldown kept on config; spike-only mode no longer uses a non-spike layer path.
     paladin_v7_layer2_cooldown_sec: float = 5.0
@@ -251,8 +255,10 @@ class BotConfig:
     paladin_v7_layer_level_offset_step: float = 0.01
     # Legacy lower-VWAP deep-dip threshold kept on config; spike-only mode no longer uses it for entries.
     paladin_v7_layer2_low_vwap_dip_below_avg: float = 0.20
-    # Legacy layer cutoff kept on config; spike-only mode no longer uses a non-spike layer path.
+    # No new-risk entries in the last N seconds of the window (flat and balanced).
     paladin_v7_no_new_layers_last_seconds: float = 60.0
+    # Balanced PM-lead layer: lead mid must be <= that leg VWAP minus this (PM dollars; sweep best 0.10).
+    paladin_v7_balanced_layer_below_avg_pm: float = 0.10
     # |up−down| <= this (shares) counts as balanced for spike re-entry checks (default 1.0).
     paladin_v7_balance_share_tolerance: float = 1.0
     # Imbalance repair: buy lighter side when pm_light + VWAP(heavy) < this (default 0.97).
@@ -272,6 +278,16 @@ class BotConfig:
     paladin_v7_reconcile_flatten: bool = True
     paladin_v7_reconcile_flatten_min_imbalance: float = 0.25
     paladin_v7_reconcile_flatten_cooldown_seconds: float = 10.0
+    # SHAMAN v1: Binance 5m/15m candle-close pattern rules -> Polymarket UP/DOWN FAK
+    shaman_v1_rules_path: str = ""
+    shaman_v1_kline_limit: int = 500
+    shaman_v1_price_pad: float = 0.03
+    # SHAMAN v1: each rule on the winning side (nG or nR at bar close) adds this much USDC to clip notional.
+    shaman_v1_usdc_per_signal: float = 1.0
+    # Hard cap on total clip notional (many rules can fire on one bar).
+    shaman_v1_notional_max_usdc: float = 500.0
+    shaman_v1_min_shares: int = 1
+    shaman_v1_min_notional_usdc: float = 1.0
 
     @property
     def window_size_seconds(self) -> int:
@@ -324,11 +340,15 @@ class BotConfig:
         else:
             perp15_ladder = [0.44, 0.43, 0.40]
 
-        raw_mode = _normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "paladin_v9"))
+        raw_mode = _normalize_strategy_mode(os.getenv("BOT_STRATEGY_MODE", "shaman_v1"))
         default_strategy_budget = (
             400.0
             if raw_mode == "paladin_v9"
-            else (10.0 if raw_mode == "paladin_v7" else 80.0)
+            else (
+                10.0
+                if raw_mode == "paladin_v7"
+                else (30.0 if raw_mode == "shaman_v1" else 80.0)
+            )
         )
 
         cfg = cls(
@@ -501,10 +521,13 @@ class BotConfig:
             paladin_v7_cheap_hedge_slip_buffer=max(
                 0.0, min(0.05, _env_float("BOT_PALADIN_V7_CHEAP_HEDGE_SLIP_BUFFER", 0.012))
             ),
+            paladin_v7_hedge_slip_addon_pm=max(
+                0.0, min(0.15, _env_float("BOT_PALADIN_V7_HEDGE_SLIP_ADDON_PM", 0.10))
+            ),
             paladin_v7_cheap_hedge_min_delay_sec=max(
                 0.0, _env_float("BOT_PALADIN_V7_CHEAP_HEDGE_MIN_DELAY_SEC", 0.0)
             ),
-            paladin_v7_hedge_timeout_seconds=max(1.0, _env_float("BOT_PALADIN_V7_HEDGE_TIMEOUT_SEC", 30.0)),
+            paladin_v7_hedge_timeout_seconds=max(1.0, _env_float("BOT_PALADIN_V7_HEDGE_TIMEOUT_SEC", 90.0)),
             paladin_v7_forced_hedge_max_book_sum=min(
                 1.50, max(1.0, _env_float("BOT_PALADIN_V7_FORCED_HEDGE_SUM_MAX", 1.30))
             ),
@@ -534,6 +557,9 @@ class BotConfig:
             ),
             paladin_v7_no_new_layers_last_seconds=max(
                 0.0, min(300.0, _env_float("BOT_PALADIN_V7_NO_NEW_LAYERS_LAST_SEC", 60.0))
+            ),
+            paladin_v7_balanced_layer_below_avg_pm=max(
+                0.0, min(0.25, _env_float("BOT_PALADIN_V7_BALANCED_LAYER_BELOW_AVG_PM", 0.10))
             ),
             paladin_v7_balance_share_tolerance=max(
                 0.0, min(50.0, _env_float("BOT_PALADIN_V7_BALANCE_SHARE_TOLERANCE", 1.0))
@@ -567,6 +593,17 @@ class BotConfig:
             paladin_v7_reconcile_flatten_cooldown_seconds=max(
                 2.0, _env_float("BOT_PALADIN_V7_RECONCILE_FLATTEN_COOLDOWN_SEC", 10.0)
             ),
+            shaman_v1_rules_path=os.getenv("BOT_SHAMAN_V1_RULES_PATH", "").strip(),
+            shaman_v1_kline_limit=max(120, _env_int("BOT_SHAMAN_V1_KLINE_LIMIT", 500)),
+            shaman_v1_price_pad=max(0.0, _env_float("BOT_SHAMAN_V1_PRICE_PAD", 0.03)),
+            shaman_v1_usdc_per_signal=max(
+                0.5, _env_float("BOT_SHAMAN_V1_USDC_PER_SIGNAL", 1.0)
+            ),
+            shaman_v1_notional_max_usdc=max(
+                1.0, _env_float("BOT_SHAMAN_V1_NOTIONAL_MAX", 500.0)
+            ),
+            shaman_v1_min_shares=max(1, _env_int("BOT_SHAMAN_V1_MIN_SHARES", 1)),
+            shaman_v1_min_notional_usdc=max(0.5, _env_float("BOT_SHAMAN_V1_MIN_NOTIONAL_USDC", 1.0)),
         )
         if cfg.strategy_mode in ("paladin_v7", "paladin_v9") and (
             cfg.strategy_budget_cap_usdc + 1e-9 < cfg.strategy_min_budget_usdc
