@@ -1462,5 +1462,77 @@
     "pred": "R",
     "wr": 0.6470588235294118,
     "n": 17
+  },
+  {
+    "timeframe": "5m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GRGGG|last=GLm",
+    "pred": "G",
+    "wr": 0.8461538461538461,
+    "n": 13
+  },
+  {
+    "timeframe": "15m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRRRR|last=RSl",
+    "pred": "R",
+    "wr": 0.8,
+    "n": 10
+  },
+  {
+    "timeframe": "15m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RGGR|last=RMh",
+    "pred": "R",
+    "wr": 0.75,
+    "n": 12
+  },
+  {
+    "timeframe": "15m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "GRRGG|last=GLh",
+    "pred": "R",
+    "wr": 0.7692307692307693,
+    "n": 13
+  },
+  {
+    "timeframe": "15m",
+    "family": "B_rg_suffix_lastTok",
+    "pattern_key": "RRRRG|last=GMl",
+    "pred": "R",
+    "wr": 0.7692307692307693,
+    "n": 13
+  },
+  {
+    "timeframe": "15m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GRRGG|last=GLh|rng=W",
+    "pred": "R",
+    "wr": 0.75,
+    "n": 12
+  },
+  {
+    "timeframe": "15m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "GRRR|last=RMl|rng=n",
+    "pred": "G",
+    "wr": 0.875,
+    "n": 8
+  },
+  {
+    "timeframe": "15m",
+    "family": "C_rg_suffix_last2Tok",
+    "pattern_key": "GRRGR|t-1=GSl|t=RMl",
+    "pred": "G",
+    "wr": 0.7777777777777778,
+    "n": 9
+  },
+  {
+    "timeframe": "15m",
+    "family": "D_rg_rng_lastTok",
+    "pattern_key": "RRRRG|last=GMl|rng=n",
+    "pred": "R",
+    "wr": 0.75,
+    "n": 8
   }
 ]
