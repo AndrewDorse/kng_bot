@@ -345,7 +345,8 @@ class ShamanV1Engine:
 
         if pred is not None and contract is not None:
             rem = self._pm_seconds_remaining(contract)
-            if rem > float(self.config.strategy_new_order_cutoff_seconds):
+            cutoff = float(self.config.strategy_new_order_cutoff_seconds)
+            if rem > cutoff:
                 tok = contract.up if win_side == "UP" else contract.down
                 ask = self.trader.get_best_ask(tok.token_id)
                 if ask is not None and ask > 0:
@@ -371,16 +372,55 @@ class ShamanV1Engine:
                                 action += " SENT"
                             except Exception as exc:
                                 action += f" ORDER_ERR={exc!r}"
+                                _LOG.warning(
+                                    "SHAMAN_ORDER_ERR %s: %s (CLOB creds, balance, allowance, or API)",
+                                    label,
+                                    exc,
+                                    exc_info=True,
+                                )
                         else:
                             action += " NO_SEND_POLY_DRY_RUN"
                     else:
                         action = "PM_skip notional<=0"
                 else:
                     action = "PM_skip no_ask"
+                    if not self.config.dry_run:
+                        _LOG.warning(
+                            "SHAMAN_NO_ASK: signal=%s nG=%d nR=%d side=%s notional=%.2f — CLOB has no ask "
+                            "(empty book or no sell-side liquidity) token=%s slug=%s",
+                            label,
+                            ng,
+                            nr,
+                            win_side,
+                            notional,
+                            (tok.token_id[:20] + "…")
+                            if tok and getattr(tok, "token_id", None)
+                            else "?",
+                            slug,
+                        )
             else:
-                action = f"PM_skip cutoff rem_s={rem:.1f}"
+                action = f"PM_skip cutoff rem_s={rem:.1f} (cutoff_s={cutoff:.0f})"
+                if not self.config.dry_run and pred is not None:
+                    _LOG.warning(
+                        "SHAMAN_CUTOFF: %s nG=%d nR=%d notional=%.2f rem=%.1fs (no new orders in last %.0fs of window) slug=%s",
+                        label,
+                        ng,
+                        nr,
+                        notional,
+                        rem,
+                        cutoff,
+                        slug,
+                    )
         elif pred is not None:
             action = "PM_skip no_contract"
+            if not self.config.dry_run:
+                _LOG.warning(
+                    "SHAMAN_NO_CONTRACT: %s nG=%d nR=%d — Gamma has no market for this %dm window (check slug / API)",
+                    label,
+                    ng,
+                    nr,
+                    window_minutes,
+                )
 
         _LOG.info(
             "%s WINDOW_START pm_window=%dm closed_signal_open_ms=%s next_bar_open_ms=%s %s | %s",

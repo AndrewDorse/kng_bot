@@ -576,15 +576,21 @@ class PolymarketTrader:
     def get_best_ask(self, token_id: str) -> float | None:
         """Get lowest ask price — what it costs to buy right now.
 
-        Used by hedge trigger logic: when best_ask >= hedge_price,
-        we execute the hedge buy immediately."""
+        Uses the **minimum** ask across the book; the CLOB does not always guarantee
+        sort order, and ``[0]`` is not always the best ask. Empty book → None (SHAMAN
+        then skips with ``PM_skip no_ask`` — common when the outcome has no offers yet).
+        """
         try:
             book = self.get_order_book(token_id)
             asks = book.get("asks") or []
-            if asks:
-                price = float(asks[0].get("price", 0))
-                return price if price > 0 else None
-            return None
+            if not asks:
+                return None
+            best: float | None = None
+            for a in asks:
+                p = float(a.get("price", 0))
+                if p > 0 and (best is None or p < best):
+                    best = p
+            return best
         except Exception:
             return None
 
