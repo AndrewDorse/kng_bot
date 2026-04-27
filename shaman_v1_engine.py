@@ -22,8 +22,6 @@ from trader import PolymarketTrader
 
 _BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 _LOG = logging.getLogger("shaman_v1")
-# Polymarket CLOB: order notional (shares × limit price) must be at least $1 USDC; 1 sh @ 0.99 = $0.99 → rejected.
-_CLOB_MIN_ORDER_USDC = 1.0
 
 
 def configure_shaman_runtime_logging() -> None:
@@ -140,26 +138,6 @@ def _notional_usdc(winning_count: int, cfg: BotConfig) -> float:
         raw = float(winning_count) * float(cfg.shaman_v1_usdc_per_signal)
     capped = min(float(cfg.shaman_v1_notional_max_usdc), raw)
     return _integer_clip_notional_usdc(capped)
-
-
-def _shares_for_usdc_clip(*, notional_usdc: float, limit_px: float) -> float:
-    """Whole shares; CLOB taker `size` must not imply **< $1** notional (e.g. 1 @ 0.99 → invalid).
-
-    Start from ``floor(notional/price)``. If that order value is under ``_CLOB_MIN_ORDER_USDC``,
-    use ``ceil(1.0/price)`` shares instead (may spend more than *integer* notional; e.g. $1 budget @ 0.99 → 2 sh).
-    """
-    if notional_usdc <= 0 or limit_px <= 0:
-        return 0.0
-    usd, px = float(notional_usdc), float(limit_px)
-    if px <= 0:
-        return 0.0
-    n = int(math.floor(usd / px + 1e-12))
-    if n <= 0:
-        return 0.0
-    est = n * px
-    if est < _CLOB_MIN_ORDER_USDC - 1e-9:
-        n = int(math.ceil(_CLOB_MIN_ORDER_USDC / px - 1e-12))
-    return float(n)
 
 
 @dataclass(slots=True)
@@ -372,32 +350,28 @@ class ShamanV1Engine:
                 if ask is not None and ask > 0:
                     pad = max(0.0, float(self.config.shaman_v1_price_pad))
                     entry_limit_px = min(0.99, round(float(ask) + pad, 2))
-                    # Integer $ budget → whole shares, with CLOB $1 min order value (sh×px), not 0.99 @0.99.
-                    shares = _shares_for_usdc_clip(notional_usdc=notional, limit_px=entry_limit_px)
-                    if shares > 1e-9:
-                        entry_ask = float(ask)
-                        token_id = tok.token_id
-                        est = shares * entry_limit_px
+                    entry_ask = float(ask)
+                    token_id = tok.token_id
+                    # Live: USDC budget only — ``create_market_order`` sizes from the book (no local share math).
+                    # Dry-run: approximate position in shares for WINDOW_END PnL logging.
+                    shares = notional / max(float(ask), 0.01) if notional > 1e-12 else 0.0
+                    if notional > 1e-12:
                         action = (
-                            f"PM_clip sz={shares:.6f} cap≈${est:.2f}/${notional:.2f} "
-                            f"limit<={entry_limit_px:.2f} ask={ask:.2f} slug={slug} Tminus_s={rem:.0f}"
+                            f"PM_mkt usdc=${notional:.2f} (book-priced FAK) ref_ask={ask:.2f} "
+                            f"ref_limit≈{entry_limit_px:.2f} slug={slug} Tminus_s={rem:.0f}"
                         )
                         if not self.config.dry_run:
                             try:
-                                self.trader.place_marketable_buy_with_result(
+                                self.trader.place_market_buy_usdc_with_result(
                                     tok,
-                                    entry_limit_px,
-                                    shares,
+                                    notional,
                                     confirm_get_order=self.config.polymarket_fak_confirm_get_order,
                                 )
                                 action += " SENT"
                             except Exception as exc:
                                 action += f" ORDER_ERR={exc!r}"
                     else:
-                        action = (
-                            f"PM_skip clip_too_small_for_one_share "
-                            f"(notional=${notional:.2f} limit_px={entry_limit_px:.2f} min_sz≈{1.0 / entry_limit_px:.4f}sh)"
-                        )
+                        action = "PM_skip notional<=0"
                 else:
                     action = "PM_skip no_ask"
             else:

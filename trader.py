@@ -14,6 +14,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     AssetType,
     BalanceAllowanceParams,
+    MarketOrderArgs,
     OpenOrderParams,
     OrderArgs,
     OrderType,
@@ -26,11 +27,7 @@ from config import (
 
 
 def _clob_taker_size_shares(size: float) -> float:
-    """Polymarket CLOB: taker (outcome share) size — max 4 decimal places, no float noise.
-
-    SHAMAN sizes outcome shares as **integers** in ``shaman_v1_engine`` so notional/price
-    never produces values like 2.0202 at 0.99.
-    """
+    """Polymarket CLOB: taker (outcome share) size — max 4 decimal places, no float noise."""
     if size <= 0:
         return 0.0
     q = Decimal(str(float(size))).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
@@ -301,6 +298,91 @@ class PolymarketTrader:
             requested_shares=float(sz),
             limit_price=float(price),
             confirm=confirm_get_order,
+        )
+
+    def place_market_buy_usdc(
+        self,
+        token: TokenMarket,
+        usdc: float,
+        *,
+        fee_rate_bps: int | None = None,
+    ) -> dict[str, Any]:
+        """Buy at the current book (``create_market_order``): spend ``usdc`` USDC, not a share count."""
+        with self._taker_order_lock:
+            return self._place_market_buy_usdc_impl(token, usdc, fee_rate_bps=fee_rate_bps)
+
+    def _place_market_buy_usdc_impl(
+        self,
+        token: TokenMarket,
+        usdc: float,
+        *,
+        fee_rate_bps: int | None = None,
+    ) -> dict[str, Any]:
+        u = float(usdc)
+        if u <= 0:
+            raise ValueError("usdc must be > 0")
+        margs = MarketOrderArgs(
+            token_id=token.token_id,
+            amount=u,
+            side=BUY,
+            price=0.0,
+            order_type=OrderType.FAK,
+        )
+        if fee_rate_bps is not None:
+            margs.fee_rate_bps = fee_rate_bps
+        signed = self.client.create_market_order(margs, options=None)
+        return self.client.post_order(signed, OrderType.FAK)
+
+    def place_market_buy_usdc_with_result(
+        self,
+        token: TokenMarket,
+        usdc: float,
+        *,
+        confirm_get_order: bool = True,
+        fee_rate_bps: int | None = None,
+    ) -> Any:
+        """FAK market buy sized in **USDC**; signed price comes from the order book (py_clob_client)."""
+        with self._taker_order_lock:
+            return self._place_market_buy_usdc_with_result_impl(
+                token,
+                usdc,
+                confirm_get_order=confirm_get_order,
+                fee_rate_bps=fee_rate_bps,
+            )
+
+    def _place_market_buy_usdc_with_result_impl(
+        self,
+        token: TokenMarket,
+        usdc: float,
+        *,
+        confirm_get_order: bool = True,
+        fee_rate_bps: int | None = None,
+    ) -> Any:
+        from clob_fak import fak_buy_with_confirm
+
+        u = float(usdc)
+        if u <= 0:
+            raise ValueError("usdc must be > 0")
+        margs = MarketOrderArgs(
+            token_id=token.token_id,
+            amount=u,
+            side=BUY,
+            price=0.0,
+            order_type=OrderType.FAK,
+        )
+        if fee_rate_bps is not None:
+            margs.fee_rate_bps = fee_rate_bps
+        signed = self.client.create_market_order(margs, options=None)
+        limit_px = float(margs.price)
+        raw = self.client.post_order(signed, OrderType.FAK)
+        est_max_sh = u / 0.01 + 10.0
+        return fak_buy_with_confirm(
+            self.client.get_order,
+            raw,
+            requested_shares=est_max_sh,
+            limit_price=limit_px,
+            confirm=confirm_get_order,
+            requested_usdc=u,
         )
 
     def place_limit_sell(
