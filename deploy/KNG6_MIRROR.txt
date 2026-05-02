@@ -1,0 +1,13 @@
+# KNG6 deploy mirror — Docker image for streak076 cheap live (5m + 15m BTC up/down).
+# Replaces experimental KNG5 naming; use this repo for the strategy image.
+#
+# Local working copy:
+#   C:\Users\Lenovo\Documents\Git\KNG6
+#
+# After creating the GitHub repo (empty, no README):
+#   cd C:\Users\Lenovo\Documents\Git\KNG6
+#   git remote add origin https://github.com/<user>/KNG6.git
+#   git push -u origin main
+#
+MIRROR_LOCAL_PATH=C:\Users\Lenovo\Documents\Git\KNG6
+MIRROR_GIT_URL=https://github.com/AndrewDorse/KNG6.git
