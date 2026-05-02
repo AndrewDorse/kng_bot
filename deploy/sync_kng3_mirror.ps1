@@ -37,8 +37,7 @@ $rootFiles = @(
     "http_session.py",
     "clob_fak.py",
     "polymarket_ws.py",
-    "shaman_v1_engine.py",
-    "prst1_up_engine.py"
+    "shaman_v1_engine.py"
 )
 
 foreach ($f in $rootFiles) {

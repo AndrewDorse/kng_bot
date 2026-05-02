@@ -79,8 +79,6 @@ def _normalize_strategy_mode(raw: str | None) -> str:
         return "paladin_v9"
     if s in ("shaman_v1", "shaman1", "shaman"):
         return "shaman_v1"
-    if s in ("prst1_up", "prst1", "prst1_scalp", "prst1_up_live", "tape_scalp_up"):
-        return "prst1_up"
     if s in ("iy2", "iy_2", "wallet_overlap", "wallet_overlap_live", "iy2_live"):
         return "iy2"
     if s in ("iy3", "iy_3", "wallet_overlap_path", "wallet_overlap_path_live", "iy3_live"):
@@ -292,17 +290,6 @@ class BotConfig:
     shaman_v1_notional_max_usdc: float = 500.0
     shaman_v1_min_shares: int = 1
     shaman_v1_min_notional_usdc: float = 1.0
-    # PRST1 UP tape scalp (Binance fair vs PM UP mid; $1 market buy; TP or timeout sell)
-    prst1_notional_usdc: float = 1.0
-    prst1_open_edge: float = 0.065
-    prst1_min_net: float = 0.065
-    prst1_band_lo: float = 0.32
-    prst1_band_hi: float = 0.68
-    prst1_sigma: float = 130.0
-    prst1_slip: float = 0.008
-    prst1_max_hold_sec: int = 135
-    prst1_cooldown_sec: int = 2
-    prst1_max_trades_per_window: int = 6
 
     @property
     def window_size_seconds(self) -> int:
@@ -361,7 +348,7 @@ class BotConfig:
             if raw_mode == "paladin_v9"
             else (
                 10.0
-                if raw_mode in ("paladin_v7", "prst1_up")
+                if raw_mode == "paladin_v7"
                 else (30.0 if raw_mode == "shaman_v1" else 80.0)
             )
         )
@@ -624,16 +611,6 @@ class BotConfig:
             ),
             shaman_v1_min_shares=max(1, _env_int("BOT_SHAMAN_V1_MIN_SHARES", 1)),
             shaman_v1_min_notional_usdc=max(0.5, _env_float("BOT_SHAMAN_V1_MIN_NOTIONAL_USDC", 1.0)),
-            prst1_notional_usdc=max(0.5, min(50.0, _env_float("BOT_PRST1_NOTIONAL_USDC", 1.0))),
-            prst1_open_edge=max(0.0, _env_float("BOT_PRST1_OPEN_EDGE", 0.065)),
-            prst1_min_net=max(0.0, _env_float("BOT_PRST1_MIN_NET", 0.065)),
-            prst1_band_lo=max(0.01, min(0.49, _env_float("BOT_PRST1_BAND_LO", 0.32))),
-            prst1_band_hi=min(0.99, max(0.51, _env_float("BOT_PRST1_BAND_HI", 0.68))),
-            prst1_sigma=max(1.0, _env_float("BOT_PRST1_SIGMA", 130.0)),
-            prst1_slip=max(0.0, min(0.05, _env_float("BOT_PRST1_SLIP", 0.008))),
-            prst1_max_hold_sec=max(5, min(890, _env_int("BOT_PRST1_MAX_HOLD_SEC", 135))),
-            prst1_cooldown_sec=max(0, min(120, _env_int("BOT_PRST1_COOLDOWN_SEC", 2))),
-            prst1_max_trades_per_window=max(1, min(50, _env_int("BOT_PRST1_MAX_TRADES_PER_WINDOW", 6))),
         )
         if cfg.strategy_mode in ("paladin_v7", "paladin_v9") and (
             cfg.strategy_budget_cap_usdc + 1e-9 < cfg.strategy_min_budget_usdc
