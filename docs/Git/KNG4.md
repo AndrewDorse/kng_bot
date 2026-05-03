@@ -2,7 +2,7 @@
 
 **Checkout:** `C:\Users\Lenovo\Documents\Git\KNG4` (or your own clone).
 
-**What it runs:** **PRST1** — implied-fair vs CLOB **UP** scalp (`prst1/`), **not** the streak→cheap rule. Default **5m + 15m** lanes, env vars `PRST1_*` (see `.env.example`).
+**What it runs:** **PRST1** — implied-fair vs CLOB **UP** scalp (`prst1/`), **not** the streak→cheap rule. Default **15m-only** lane (`PRST1_WINDOW_MINUTES=15`); set `5,15` for dual lanes. Env vars `PRST1_*` (see `.env.example`).
 
 ## Docker (go live)
 
