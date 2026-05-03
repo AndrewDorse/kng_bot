@@ -2,7 +2,7 @@
 
 **Checkout:** `C:\Users\Lenovo\Documents\Git\KNG4` (or your own clone).
 
-**What it runs:** **PRST1** — implied-fair vs CLOB scalp (`prst1/`): **`PRST1_ENTRY_MODE=EITHER_CHEAP`** picks **UP or DOWN** by larger mispricing vs BTC-implied fair; **`TIGHT_BAND_UP`** is the legacy band-gated **UP-only** path. **15m-only** (`PRST1_WINDOW_MINUTES=15`); other lengths are rejected until 5m is re-enabled. Env vars `PRST1_*` (see `.env.example`).
+**What it runs:** **PRST1** — implied-fair vs CLOB (`prst1/`). **Default `PRST1_ENTRY_MODE=TIGHT_BAND_UP`** (band-gated cheap **UP**). **`EITHER_CHEAP`** (UP or DOWN) is optional and was misleading on tape when paired with unrealistically low slip—use **`PALADIN/sim_prst1_last100_realistic_sheet.py`** before trusting numbers. **15m-only** (`PRST1_WINDOW_MINUTES=15`). Env vars `PRST1_*` (see KNG4 `.env.example`).
 
 ## Docker (go live)
 
