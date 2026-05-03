@@ -3,7 +3,7 @@
 Run **multiple skew-streak-cheap variants** on the **same newest N** public 15m windows,
 using the same entry rule as ``_first_cheap_after_skew_streak`` and ``_pnl_dollar_stake``.
 
-Default: **10** variants around strategy-1 **streak12_cheap19** (0.76 / 12s / 0.19) plus ablations, one CSV with per-variant
+Default: **10** variants: strategy-1 **slice1000** (0.82 / 22s / 0.19) plus legacy/ablations, one CSV with per-variant
 totals and averages; console prints variants sorted by EV per non-tie window.
 
 Run::
@@ -45,9 +45,9 @@ from sim_public_pool_cheap_winner_comeback import (  # noqa: E402
 
 # Ten variants: (id, skew_thr, streak_seconds, cheap_thr)
 DEFAULT_VARIANTS: list[tuple[str, float, int, float]] = [
-    ("strategy1_streak12_cheap19", 0.76, 12, 0.19),
+    ("strategy1_slice1000", 0.82, 22, 0.19),
+    ("legacy_streak12_076_cheap19", 0.76, 12, 0.19),
     ("legacy_streak20_cheap19", 0.76, 20, 0.19),
-    ("cheap17", 0.76, 20, 0.17),
     ("cheap18", 0.76, 20, 0.18),
     ("cheap20", 0.76, 20, 0.20),
     ("streak15", 0.76, 15, 0.19),

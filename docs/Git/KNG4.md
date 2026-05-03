@@ -21,7 +21,7 @@ Image name in compose: `kng4-prst1:local`.
 
 | Label | Repo | Rule (short) |
 |--------|------|----------------|
-| **Strategy-1** (streak→cheap, **current**) | **KNG6** | **12** s `max(up,down) ≥ 0.76`, then first leg **≤ 0.19**, **$1** FAK once per slug (`KNG6_*` env). |
+| **Strategy-1** (streak→cheap, **current**) | **KNG6** | **22** s `max(up,down) ≥ 0.82`, then first leg **≤ 0.19**, **$1** FAK once per slug (`KNG6_*` env; see PALADIN `sim_streak076_grid_slice1000.py`). |
 | PRST1 scalp | **KNG4** (this doc) | `PRST1_OPEN_EDGE`, band, TP / time-stop (`PRST1_*`). |
 
 Research scripts in **`kng_bot3`** (`PALADIN/sim_streak076_last_n_sheet.py`, `sim_streak076_sweep_last_n.py`) align **strategy-1** with **KNG6** defaults.

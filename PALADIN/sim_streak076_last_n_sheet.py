@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Simulate **strategy-1 streak12_cheap19** (same as KNG6 / ``X_streak12_076_cheap19``) on the **newest N** public **15m** windows,
+Simulate **strategy-1 slice1000** (same defaults as KNG6: skew **0.82**, streak **22** s, cheap **0.19**) on the **newest N** public **15m** windows,
 then write a **CSV sheet**: summary totals & averages, then one row per window.
 
-Rule: **12** consecutive seconds ``max(up,down) >= 0.76``, then first second either leg ``<= 0.19``;
+Rule: **22** consecutive seconds ``max(up,down) >= 0.82``, then first second either leg ``<= 0.19``;
 **$1** stake at that mid; PnL ``1/entry-1`` if win else ``-1``; winner = higher final mid (ties skipped).
 
 Run::
@@ -42,8 +42,8 @@ from sim_public_pool_cheap_winner_comeback import (  # noqa: E402
     _pnl_dollar_stake,
 )
 
-_SKEW = 0.76
-_STREAK = 12
+_SKEW = 0.82
+_STREAK = 22
 _CHEAP = 0.19
 
 
@@ -163,7 +163,7 @@ def main() -> int:
     avg_entry_hit = entry_sum_hits / hits if hits else 0.0
 
     summary_rows = [
-        {"row_kind": "SUMMARY", "metric": "strategy", "value": "strategy-1 streak12_cheap19 (12x max>=0.76 then cheap<=0.19), $1 stake"},
+        {"row_kind": "SUMMARY", "metric": "strategy", "value": "strategy-1 slice1000 (22x max>=0.82 then cheap<=0.19), $1 stake"},
         {"row_kind": "SUMMARY", "metric": "snapshots_dir", "value": str(snap)},
         {"row_kind": "SUMMARY", "metric": "paths_requested_newest_first", "value": str(n_req)},
         {"row_kind": "SUMMARY", "metric": "windows_tie_skipped", "value": str(n_tie_skip)},

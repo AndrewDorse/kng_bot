@@ -1,4 +1,4 @@
-# KNG6 deploy mirror — Docker image for strategy-1 streak12_cheap19 (5m + 15m BTC up/down).
+# KNG6 deploy mirror — Docker image for strategy-1 slice1000 (skew 0.82, streak 22, cheap 0.19; default 15m BTC up/down).
 # Replaces experimental KNG5 naming; use this repo for the strategy image.
 #
 # Local working copy:
